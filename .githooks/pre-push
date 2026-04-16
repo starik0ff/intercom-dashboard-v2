@@ -1,0 +1,40 @@
+#!/bin/sh
+# Pre-push hook: scan staged changes for secrets before pushing
+
+echo "Running pre-push secret scan..."
+
+ISSUES=0
+
+# Check for hardcoded tokens/passwords in tracked files
+PATTERNS='(INTERCOM_TOKEN|INTERCOM_ACCESS_TOKEN|api_key|api_secret|password|Bearer)\s*[:=]\s*["'"'"'][a-zA-Z0-9_\-]{8,}'
+
+MATCHES=$(git diff --cached --diff-filter=ACMR -U0 HEAD 2>/dev/null | grep -E "^\+" | grep -vE "^\+\+\+" | grep -iE "$PATTERNS" || true)
+if [ -n "$MATCHES" ]; then
+  echo "ERROR: Potential secrets in push:"
+  echo "$MATCHES"
+  ISSUES=$((ISSUES + 1))
+fi
+
+# Check for .env files
+ENV_FILES=$(git diff --name-only HEAD @{u} 2>/dev/null | grep -E '\.env' || true)
+if [ -n "$ENV_FILES" ]; then
+  echo "ERROR: .env file being pushed: $ENV_FILES"
+  ISSUES=$((ISSUES + 1))
+fi
+
+# Check for credential files
+CRED_FILES=$(git diff --name-only HEAD @{u} 2>/dev/null | grep -E '(credentials/|users\.json|\.pem$|\.key$)' || true)
+if [ -n "$CRED_FILES" ]; then
+  echo "ERROR: Credential file being pushed: $CRED_FILES"
+  ISSUES=$((ISSUES + 1))
+fi
+
+if [ $ISSUES -gt 0 ]; then
+  echo ""
+  echo "Push blocked: $ISSUES secret issue(s) found."
+  echo "Fix the issues or use --no-verify to bypass (not recommended)."
+  exit 1
+fi
+
+echo "No secrets detected. Push OK."
+exit 0

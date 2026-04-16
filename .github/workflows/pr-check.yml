@@ -1,0 +1,217 @@
+name: PR Security & Quality Check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # 1. Summary of changes
+  change-summary:
+    name: Change Summary
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate change summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+
+            const base = context.payload.pull_request.base.sha;
+            const head = context.payload.pull_request.head.sha;
+
+            // Files changed
+            const files = execSync(`git diff --name-status ${base}...${head}`).toString().trim();
+            const diffStat = execSync(`git diff --stat ${base}...${head}`).toString().trim();
+
+            // Categorize changes
+            const lines = files.split('\n').filter(Boolean);
+            const added = lines.filter(l => l.startsWith('A')).length;
+            const modified = lines.filter(l => l.startsWith('M')).length;
+            const deleted = lines.filter(l => l.startsWith('D')).length;
+
+            const apiChanges = lines.filter(l => l.includes('src/app/api/')).map(l => l.split('\t').pop());
+            const uiChanges = lines.filter(l => l.includes('src/app/') && !l.includes('src/app/api/')).map(l => l.split('\t').pop());
+            const libChanges = lines.filter(l => l.includes('src/lib/')).map(l => l.split('\t').pop());
+            const scriptChanges = lines.filter(l => l.includes('scripts/')).map(l => l.split('\t').pop());
+
+            let body = `## Change Summary\n\n`;
+            body += `**${lines.length}** files changed: **${added}** added, **${modified}** modified, **${deleted}** deleted\n\n`;
+
+            if (apiChanges.length) body += `### API routes\n${apiChanges.map(f => `- \`${f}\``).join('\n')}\n\n`;
+            if (uiChanges.length) body += `### UI pages\n${uiChanges.map(f => `- \`${f}\``).join('\n')}\n\n`;
+            if (libChanges.length) body += `### Libraries\n${libChanges.map(f => `- \`${f}\``).join('\n')}\n\n`;
+            if (scriptChanges.length) body += `### Scripts\n${scriptChanges.map(f => `- \`${f}\``).join('\n')}\n\n`;
+
+            body += `<details><summary>Diff stat</summary>\n\n\`\`\`\n${diffStat}\n\`\`\`\n</details>`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  # 2. Secret scanning
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Custom secret patterns check
+        run: |
+          echo "Scanning for hardcoded secrets..."
+          ISSUES=0
+
+          # Patterns to detect
+          PATTERNS=(
+            'INTERCOM_TOKEN\s*=\s*["\x27][a-zA-Z0-9]'
+            'INTERCOM_ACCESS_TOKEN\s*=\s*["\x27][a-zA-Z0-9]'
+            'Bearer\s+[a-zA-Z0-9_\-]{20,}'
+            'password\s*[:=]\s*["\x27][^"\x27]{4,}'
+            'secret\s*[:=]\s*["\x27][^"\x27]{4,}'
+            'api[_-]?key\s*[:=]\s*["\x27][^"\x27]{4,}'
+            # ADMIN_ID is a public Intercom operator ID, not a secret — skip
+            'ssh-ed25519\s+'
+            'ssh-rsa\s+'
+            'BEGIN\s+(RSA|DSA|EC|OPENSSH)\s+PRIVATE\s+KEY'
+          )
+
+          for pattern in "${PATTERNS[@]}"; do
+            MATCHES=$(grep -rn --include='*.ts' --include='*.tsx' --include='*.js' --include='*.json' --include='*.yml' --include='*.yaml' --include='*.env*' -E "$pattern" . \
+              --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=.git \
+              --exclude='pr-check.yml' \
+              2>/dev/null || true)
+            if [ -n "$MATCHES" ]; then
+              echo "::warning::Potential secret found matching pattern: $pattern"
+              echo "$MATCHES" | head -5
+              ISSUES=$((ISSUES + 1))
+            fi
+          done
+
+          # Check for .env files committed
+          if find . -name '.env*' -not -path './node_modules/*' -not -path './.git/*' | grep -q .; then
+            echo "::error::.env file found in repository!"
+            find . -name '.env*' -not -path './node_modules/*' -not -path './.git/*'
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Check for credential files
+          for f in users.json credentials/ *.pem *.key; do
+            if [ -e "$f" ]; then
+              echo "::error::Sensitive file found: $f"
+              ISSUES=$((ISSUES + 1))
+            fi
+          done
+
+          if [ $ISSUES -gt 0 ]; then
+            echo "::error::Found $ISSUES potential secret issue(s). Review before merging!"
+            exit 1
+          fi
+
+          echo "No secrets detected."
+
+  # 3. Security audit
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: npm audit (high + critical)
+        run: npm audit --audit-level=high || true
+
+      - name: Check for known vulnerable patterns
+        run: |
+          echo "Checking for common vulnerability patterns..."
+          ISSUES=0
+
+          # SQL injection — raw string interpolation in SQL
+          SQLI=$(grep -rn --include='*.ts' --include='*.tsx' \
+            -E '\.(prepare|run|exec|query)\s*\(\s*`[^`]*\$\{(?!whereS|frag\.|dateField)' \
+            src/ --exclude-dir=node_modules 2>/dev/null || true)
+          if [ -n "$SQLI" ]; then
+            echo "::warning::Potential SQL injection — template literal in query:"
+            echo "$SQLI"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # XSS — dangerouslySetInnerHTML
+          XSS=$(grep -rn --include='*.tsx' 'dangerouslySetInnerHTML' src/ 2>/dev/null || true)
+          if [ -n "$XSS" ]; then
+            echo "::warning::dangerouslySetInnerHTML usage found (potential XSS):"
+            echo "$XSS"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # eval() usage
+          EVAL=$(grep -rn --include='*.ts' --include='*.tsx' '\beval\s*(' src/ 2>/dev/null || true)
+          if [ -n "$EVAL" ]; then
+            echo "::error::eval() usage found:"
+            echo "$EVAL"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Command injection — child_process with template literals
+          CMDI=$(grep -rn --include='*.ts' -E '(exec|spawn|execSync)\s*\(\s*`' src/ 2>/dev/null || true)
+          if [ -n "$CMDI" ]; then
+            echo "::error::Potential command injection:"
+            echo "$CMDI"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Exposed debug/internal routes
+          DEBUG=$(grep -rn --include='*.ts' -E "NODE_ENV.*(!==?|!=).*'production'" src/app/api/ 2>/dev/null || true)
+          if [ -n "$DEBUG" ]; then
+            echo "::warning::Debug-only API route found — verify not exposed in prod:"
+            echo "$DEBUG"
+          fi
+
+          if [ $ISSUES -gt 0 ]; then
+            echo "::warning::Found $ISSUES security concern(s). Review before merging."
+          else
+            echo "No obvious vulnerability patterns detected."
+          fi
+
+  # 4. Build check
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npx next build
+        env:
+          # Prevent build failures for missing runtime secrets
+          SKIP_ENV_VALIDATION: "1"
