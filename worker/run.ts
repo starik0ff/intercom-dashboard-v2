@@ -17,6 +17,7 @@ loadEnv();
 import fs from 'node:fs';
 import path from 'node:path';
 import { runIncremental } from './incremental';
+import { processExportJobs } from './export-job';
 import { getDb } from '../src/lib/db/client';
 import { setSyncState } from '../src/lib/db/sync';
 
@@ -103,10 +104,24 @@ async function main() {
     } catch (err) {
       console.error('worker: incremental run failed', err);
     }
+    // Process any pending export jobs after each sync
+    try {
+      await processExportJobs();
+    } catch (err) {
+      console.error('worker: export job processing failed', err);
+    }
+
     if (stopping) break;
     const elapsedMs = Date.now() - t0;
     const sleepMs = Math.max(5_000, INTERVAL_MIN * 60_000 - elapsedMs);
-    await new Promise((r) => setTimeout(r, sleepMs));
+    // Split sleep into 30s chunks to check for export jobs frequently
+    const chunks = Math.ceil(sleepMs / 30_000);
+    for (let i = 0; i < chunks && !stopping; i++) {
+      await new Promise((r) => setTimeout(r, Math.min(30_000, sleepMs - i * 30_000)));
+      try {
+        await processExportJobs();
+      } catch { /* logged on next full cycle */ }
+    }
   }
 }
 

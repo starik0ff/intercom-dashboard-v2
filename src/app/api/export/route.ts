@@ -128,7 +128,10 @@ export async function GET(req: NextRequest) {
   }
   const q = sp.get('q') || '';
   const adminId = sp.get('admin_id') || '';
-  const dateField = sp.get('date_field') === 'updated_at' ? 'updated_at' as const : 'created_at' as const;
+  const dfRaw = sp.get('date_field') || 'created_at';
+  const dateField = (['updated_at', 'last_message_at'] as const).includes(dfRaw as never)
+    ? (dfRaw as 'updated_at' | 'last_message_at')
+    : 'created_at' as const;
 
   const filters = parseFilters(req);
   const frag = buildConversationsWhere(filters, { alias: 'c', timeColumn: dateField });
@@ -171,15 +174,10 @@ export async function GET(req: NextRequest) {
       ORDER BY c.created_at DESC
       LIMIT ?`,
   );
-  const iter = stmt.iterate(...frag.params, ...extraParams, MAX_ROWS) as IterableIterator<Row>;
-
-  // Prepare messages query (for conversation transcript)
-  const msgStmt = db.prepare(
-    `SELECT created_at, author_type, author_id, body
-       FROM messages
-      WHERE conversation_id = ? AND body IS NOT NULL AND body != ''
-      ORDER BY created_at ASC`,
-  );
+  // Collect all matching conversation rows into an array so we can batch-load
+  // messages. Using .all() instead of .iterate() avoids holding a read cursor
+  // open across async pull() calls (better-sqlite3 iterators are synchronous).
+  const allRows = stmt.all(...frag.params, ...extraParams, MAX_ROWS) as Row[];
 
   // Admin name cache for message authors
   const adminNames = new Map<string, string>();
@@ -188,8 +186,27 @@ export async function GET(req: NextRequest) {
     .all() as { id: string; name: string }[];
   for (const a of adminsAll) adminNames.set(a.id, a.name);
 
-  function getMessages(convId: string): MessageRow[] {
-    return msgStmt.all(convId) as MessageRow[];
+  // Batch-load messages for a set of conversation IDs in one query.
+  // Reduces N+1 (1 query per conversation) to N/BATCH queries.
+  interface MsgWithConv extends MessageRow { conversation_id: string }
+  function loadMessagesBatch(ids: string[]): Map<string, MessageRow[]> {
+    const result = new Map<string, MessageRow[]>();
+    for (const id of ids) result.set(id, []);
+    if (ids.length === 0) return result;
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = db
+      .prepare(
+        `SELECT conversation_id, created_at, author_type, author_id, body
+           FROM messages
+          WHERE conversation_id IN (${placeholders})
+            AND body IS NOT NULL AND body != ''
+          ORDER BY conversation_id, created_at ASC`,
+      )
+      .all(...ids) as MsgWithConv[];
+    for (const r of rows) {
+      result.get(r.conversation_id)!.push(r);
+    }
+    return result;
   }
 
   function formatMessageForCsv(m: MessageRow): string {
@@ -207,15 +224,50 @@ export async function GET(req: NextRequest) {
   const encoder = new TextEncoder();
   const filename = `conversations_${filters.period}_${Date.now()}`;
 
-  let count = 0;
+  let cursor = 0;
+  let headerSent = false;
+  let first = true;
+  const BATCH = 50;
+
   const stream = new ReadableStream({
-    start(controller) {
+    async pull(controller) {
       try {
-        if (format === 'csv') {
-          controller.enqueue(encoder.encode('\uFEFF' + csvRow(CSV_HEADER)));
-          for (const r of iter) {
-            count++;
-            const msgs = getMessages(r.id);
+        if (!headerSent) {
+          headerSent = true;
+          if (format === 'csv') {
+            controller.enqueue(encoder.encode('\uFEFF' + csvRow(CSV_HEADER)));
+          } else {
+            controller.enqueue(encoder.encode('[\n'));
+          }
+        }
+
+        if (cursor >= allRows.length) {
+          if (format === 'json') {
+            controller.enqueue(encoder.encode('\n]\n'));
+          }
+          controller.close();
+          logActivity(user.username, user.role, 'export', {
+            format,
+            q: q || null,
+            admin_id: adminId || null,
+            period: filters.period,
+            sources: filters.sources,
+            statuses: filters.statuses,
+            count: allRows.length,
+          });
+          return;
+        }
+
+        const batch = allRows.slice(cursor, cursor + BATCH);
+        cursor += batch.length;
+
+        // One query for all messages in this batch
+        const messagesMap = loadMessagesBatch(batch.map((r) => r.id));
+
+        for (const r of batch) {
+          const msgs = messagesMap.get(r.id) || [];
+
+          if (format === 'csv') {
             const transcript = msgs.map(formatMessageForCsv).join(' | ');
             controller.enqueue(
               encoder.encode(
@@ -241,13 +293,7 @@ export async function GET(req: NextRequest) {
                 ]),
               ),
             );
-          }
-        } else {
-          controller.enqueue(encoder.encode('[\n'));
-          let first = true;
-          for (const r of iter) {
-            count++;
-            const msgs = getMessages(r.id);
+          } else {
             const obj = {
               conversation_id: r.id,
               created_at: isoOrEmpty(r.created_at),
@@ -279,18 +325,7 @@ export async function GET(req: NextRequest) {
             );
             first = false;
           }
-          controller.enqueue(encoder.encode('\n]\n'));
         }
-        controller.close();
-        logActivity(user.username, user.role, 'export', {
-          format,
-          q: q || null,
-          admin_id: adminId || null,
-          period: filters.period,
-          sources: filters.sources,
-          statuses: filters.statuses,
-          count,
-        });
       } catch (e) {
         controller.error(e);
       }

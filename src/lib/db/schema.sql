@@ -182,3 +182,22 @@ CREATE TABLE IF NOT EXISTS notifications_read (
   PRIMARY KEY (notification_id, user_id),
   FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE
 );
+
+-- ---------- export jobs ----------
+CREATE TABLE IF NOT EXISTS export_jobs (
+  id              TEXT PRIMARY KEY,
+  created_at      INTEGER NOT NULL,
+  started_at      INTEGER,
+  completed_at    INTEGER,
+  status          TEXT NOT NULL DEFAULT 'pending',  -- pending|processing|done|error
+  format          TEXT NOT NULL,                     -- csv|json
+  filters         TEXT NOT NULL,                     -- JSON blob
+  total_rows      INTEGER,
+  processed_rows  INTEGER NOT NULL DEFAULT 0,
+  file_path       TEXT,
+  file_size       INTEGER,
+  error_message   TEXT,
+  requested_by    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_export_status  ON export_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_export_created ON export_jobs(created_at);

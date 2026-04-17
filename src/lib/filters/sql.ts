@@ -11,7 +11,7 @@ export interface SqlFragment {
 
 export interface BuildOptions {
   /** Which conversations.* timestamp column to filter by. */
-  timeColumn?: 'created_at' | 'updated_at' | 'first_team_assigned_at';
+  timeColumn?: 'created_at' | 'updated_at' | 'first_team_assigned_at' | 'last_message_at';
   /** Table alias if joined (defaults to 'conversations'). */
   alias?: string;
   /** Skip status filter (e.g. for the "by status" pivot endpoint). */
@@ -27,7 +27,10 @@ export function buildConversationsWhere(
   const { from, to, sources, statuses } = resolveFilters(filters);
   const col = opts.timeColumn ?? 'created_at';
   const alias = opts.alias ?? 'conversations';
-  const t = `${alias}.${col}`;
+  // last_message_at = most recent of user/admin message timestamps (excludes technical updates)
+  const t = col === 'last_message_at'
+    ? `MAX(COALESCE(${alias}.last_user_message_at, 0), COALESCE(${alias}.last_admin_message_at, 0))`
+    : `${alias}.${col}`;
 
   const conds: string[] = [];
   const params: unknown[] = [];

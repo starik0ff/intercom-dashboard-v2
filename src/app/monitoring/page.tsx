@@ -375,7 +375,7 @@ function ExportConversationsSection() {
   const qs = filtersToQueryString(filters);
   const [page, setPage] = useState(1);
   const [pageSize] = useState(50);
-  const [dateField, setDateField] = useState<'created_at' | 'updated_at'>('created_at');
+  const [dateField, setDateField] = useState<'created_at' | 'updated_at' | 'last_message_at'>('created_at');
   const [adminId, setAdminId] = useState('');
   const [admins, setAdmins] = useState<AdminOption[]>([]);
   const [data, setData] = useState<ConversationsResp | null>(null);
@@ -429,10 +429,70 @@ function ExportConversationsSection() {
   }, [qs, key, page, pageSize, dateField, adminId]);
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
-  const dfParam = dateField === 'updated_at' ? '&date_field=updated_at' : '';
-  const adminParam = adminId ? `&admin_id=${adminId}` : '';
-  const exportCsvHref = `/api/export?${qs}${qs ? "&" : ""}format=csv${dfParam}${adminParam}`;
-  const exportJsonHref = `/api/export?${qs}${qs ? "&" : ""}format=json${dfParam}${adminParam}`;
+
+  // Background export state
+  const [exportJobId, setExportJobId] = useState<string | null>(null);
+  const [exportStatus, setExportStatus] = useState<'idle' | 'pending' | 'processing' | 'done' | 'error'>('idle');
+  const [exportProgress, setExportProgress] = useState<{ processed: number; total: number } | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const startExport = async (format: 'csv' | 'json') => {
+    setExportStatus('pending');
+    setExportProgress(null);
+    setExportError(null);
+    try {
+      const filtersObj = {
+        period: filters.period,
+        from: filters.from,
+        to: filters.to,
+        sources: filters.sources,
+        statuses: filters.statuses,
+        date_field: dateField,
+        admin_id: adminId || undefined,
+      };
+      const res = await fetch('/api/export/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ format, filters: filtersObj }),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      const { id } = await res.json();
+      setExportJobId(id);
+    } catch (e) {
+      setExportStatus('error');
+      setExportError(String(e));
+    }
+  };
+
+  // Poll export status
+  useEffect(() => {
+    if (!exportJobId || exportStatus === 'done' || exportStatus === 'error' || exportStatus === 'idle') return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/export/status?id=${exportJobId}`);
+        if (!res.ok) return;
+        const job = await res.json();
+        if (job.status === 'processing' || job.status === 'pending') {
+          setExportStatus('processing');
+          if (job.total_rows) setExportProgress({ processed: job.processed_rows || 0, total: job.total_rows });
+        } else if (job.status === 'done') {
+          setExportStatus('done');
+          setExportProgress(job.total_rows ? { processed: job.total_rows, total: job.total_rows } : null);
+        } else if (job.status === 'error') {
+          setExportStatus('error');
+          setExportError(job.error_message || 'Unknown error');
+        }
+      } catch { /* retry next tick */ }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [exportJobId, exportStatus]);
+
+  const resetExport = () => {
+    setExportJobId(null);
+    setExportStatus('idle');
+    setExportProgress(null);
+    setExportError(null);
+  };
 
   return (
     <section className="mt-10">
@@ -449,8 +509,8 @@ function ExportConversationsSection() {
           </button>
           <button
             type="button"
-            onClick={() => setDateField('updated_at')}
-            className={`px-2 py-1 rounded ${dateField === 'updated_at' ? 'bg-white shadow text-gray-900 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+            onClick={() => setDateField('last_message_at')}
+            className={`px-2 py-1 rounded ${dateField === 'last_message_at' ? 'bg-white shadow text-gray-900 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
           >
             По активности
           </button>
@@ -471,20 +531,59 @@ function ExportConversationsSection() {
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
-          <a
-            href={exportCsvHref}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
-          >
-            <FileText className="w-4 h-4" />
-            CSV
-          </a>
-          <a
-            href={exportJsonHref}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-gray-800 text-white rounded hover:bg-gray-900"
-          >
-            <FileJson className="w-4 h-4" />
-            JSON
-          </a>
+          {exportStatus === 'idle' ? (
+            <>
+              <button
+                onClick={() => startExport('csv')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+              >
+                <FileText className="w-4 h-4" />
+                CSV
+              </button>
+              <button
+                onClick={() => startExport('json')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-gray-800 text-white rounded hover:bg-gray-900"
+              >
+                <FileJson className="w-4 h-4" />
+                JSON
+              </button>
+            </>
+          ) : exportStatus === 'pending' || exportStatus === 'processing' ? (
+            <div className="flex items-center gap-2 text-sm text-gray-600">
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              <span>
+                {exportProgress
+                  ? `${exportProgress.processed.toLocaleString('ru-RU')} / ${exportProgress.total.toLocaleString('ru-RU')}`
+                  : 'Подготовка...'}
+              </span>
+            </div>
+          ) : exportStatus === 'done' ? (
+            <div className="flex items-center gap-2">
+              <a
+                href={`/api/export/download?id=${exportJobId}`}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-green-600 text-white rounded hover:bg-green-700"
+              >
+                <Download className="w-4 h-4" />
+                Скачать
+              </a>
+              <button
+                onClick={resetExport}
+                className="text-sm text-gray-500 hover:text-gray-700 underline"
+              >
+                Новый экспорт
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-red-600">{exportError || 'Ошибка'}</span>
+              <button
+                onClick={resetExport}
+                className="text-sm text-gray-500 hover:text-gray-700 underline"
+              >
+                Повторить
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

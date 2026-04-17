@@ -11,6 +11,7 @@ const ACTION_LABELS: Record<ActionType, string> = {
   search: "Поиск",
   view_conversation: "Просмотр диалога",
   export: "Экспорт",
+  export_start: "Запуск экспорта",
 };
 
 const ACTION_ICONS: Record<ActionType, React.ReactNode> = {
@@ -20,6 +21,7 @@ const ACTION_ICONS: Record<ActionType, React.ReactNode> = {
   search: <Search className="w-3.5 h-3.5" />,
   view_conversation: <Eye className="w-3.5 h-3.5" />,
   export: <Download className="w-3.5 h-3.5" />,
+  export_start: <Download className="w-3.5 h-3.5" />,
 };
 
 const ACTION_COLORS: Record<ActionType, string> = {
@@ -29,6 +31,7 @@ const ACTION_COLORS: Record<ActionType, string> = {
   search: "bg-blue-100 text-blue-700",
   view_conversation: "bg-purple-100 text-purple-700",
   export: "bg-orange-100 text-orange-700",
+  export_start: "bg-yellow-100 text-yellow-700",
 };
 
 function formatDatetime(iso: string): string {

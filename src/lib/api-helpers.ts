@@ -20,3 +20,20 @@ export async function withAuth<T>(
 export function parseFilters(req: NextRequest) {
   return filtersFromSearchParams(req.nextUrl.searchParams);
 }
+
+/** Parse filters from a plain object (used by worker for export jobs). */
+export function parseFiltersFromObj(obj: {
+  period: string;
+  from?: number | null;
+  to?: number | null;
+  sources?: string[];
+  statuses?: string[];
+}) {
+  const sp = new URLSearchParams();
+  sp.set('period', obj.period);
+  if (obj.from != null) sp.set('from', String(obj.from));
+  if (obj.to != null) sp.set('to', String(obj.to));
+  if (obj.sources?.length) sp.set('sources', obj.sources.join(','));
+  if (obj.statuses?.length) sp.set('statuses', obj.statuses.join(','));
+  return filtersFromSearchParams(sp);
+}

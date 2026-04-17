@@ -42,7 +42,10 @@ export async function GET(req: NextRequest) {
       Math.max(1, parseInt(sp.get('page_size') || '50', 10) || 50),
     );
     const adminId = sp.get('admin_id') || '';
-    const dateField = sp.get('date_field') === 'updated_at' ? 'updated_at' as const : 'created_at' as const;
+    const dfRaw = sp.get('date_field') || 'created_at';
+    const dateField = (['updated_at', 'last_message_at'] as const).includes(dfRaw as never)
+      ? (dfRaw as 'updated_at' | 'last_message_at')
+      : 'created_at' as const;
 
     const filters = parseFilters(req);
     const frag = buildConversationsWhere(filters, { alias: 'c', timeColumn: dateField });
@@ -79,7 +82,7 @@ export async function GET(req: NextRequest) {
            LEFT JOIN admins a ON a.id = c.admin_assignee_id
            LEFT JOIN teams  t ON t.id = c.team_assignee_id
            ${whereSql}
-          ORDER BY c.${dateField} DESC
+          ORDER BY ${dateField === 'last_message_at' ? 'MAX(COALESCE(c.last_user_message_at, 0), COALESCE(c.last_admin_message_at, 0))' : `c.${dateField}`} DESC
           LIMIT ? OFFSET ?`,
       )
       .all(...frag.params, ...extraParams, pageSize, offset) as Row[];

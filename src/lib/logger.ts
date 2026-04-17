@@ -15,7 +15,8 @@ export type ActionType =
   | "logout"
   | "search"
   | "view_conversation"
-  | "export";
+  | "export"
+  | "export_start";
 
 export interface LogEntry {
   ts: number;
