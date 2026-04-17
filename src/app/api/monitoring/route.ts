@@ -1,15 +1,7 @@
 import { NextRequest } from "next/server";
-import { loadConversations, loadTeammateEmails, loadAdminIdNames } from "@/lib/data";
+import { getDb } from "@/lib/db/client";
 
 export const dynamic = "force-dynamic";
-
-function isCustomer(author: string): boolean {
-  return author.includes("@") || /^lead[_:]/.test(author) || /^user[_:]/.test(author);
-}
-
-function isManager(author: string): boolean {
-  return !isCustomer(author) && author !== "unknown" && author.trim().length > 0;
-}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
@@ -17,159 +9,209 @@ export async function GET(req: NextRequest) {
   const page = Math.max(1, parseInt(searchParams.get("page") || "1"));
   const pageSize = 100;
 
-  const conversations = await loadConversations();
-  const now = Date.now();
-  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+  const db = getDb();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const sevenDaysAgo = nowSec - 7 * 24 * 60 * 60;
+  const oneHourMs = 60 * 60 * 1000;
 
-  const recent = conversations.filter(
-    (c) => new Date(c.updated_at).getTime() > now - sevenDaysMs
-  );
-
+  // ---------- filter: inWork (conversations updated in last 7 days) ----------
   if (filter === "inWork") {
-    const sorted = [...recent].sort(
-      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-    );
-    const list = sorted.slice((page - 1) * pageSize, page * pageSize).map((c) => {
-      const lastMsg = c.messages[c.messages.length - 1];
-      return {
-        id: c.conversation_id,
-        updated_at: c.updated_at,
-        messageCount: c.messages.length,
-        lastAuthor: lastMsg?.author || "",
-        preview: lastMsg?.body?.slice(0, 120) || "",
-      };
+    const rows = db.prepare(`
+      SELECT c.id, c.updated_at,
+             c.parts_count AS messageCount,
+             COALESCE(m.author_type, '') AS lastAuthor,
+             COALESCE(SUBSTR(m.body, 1, 120), '') AS preview
+      FROM conversations c
+      LEFT JOIN messages m ON m.conversation_id = c.id
+        AND m.created_at = (SELECT MAX(m2.created_at) FROM messages m2 WHERE m2.conversation_id = c.id AND m2.part_type = 'comment')
+      WHERE c.updated_at > ?
+      ORDER BY c.updated_at DESC
+      LIMIT ? OFFSET ?
+    `).all(sevenDaysAgo, pageSize, (page - 1) * pageSize) as Array<{
+      id: string; updated_at: number; messageCount: number; lastAuthor: string; preview: string;
+    }>;
+    const total = (db.prepare(`SELECT COUNT(*) AS n FROM conversations WHERE updated_at > ?`).get(sevenDaysAgo) as { n: number }).n;
+    return Response.json({
+      list: rows.map(r => ({
+        id: r.id,
+        updated_at: new Date(r.updated_at * 1000).toISOString(),
+        messageCount: r.messageCount,
+        lastAuthor: r.lastAuthor,
+        preview: r.preview,
+      })),
+      total,
+      page,
+      pageSize,
     });
-    return Response.json({ list, total: recent.length, page, pageSize });
   }
 
-  const unansweredItems: Array<{
-    id: string;
-    waitingMs: number;
-    lastAuthor: string;
-    lastDate: string;
-    preview: string;
-  }> = [];
-  const responseTimes: number[] = [];
+  // ---------- Unanswered: last message is from user/lead/contact ----------
+  // A conversation is "unanswered" if the newest comment was by a non-admin.
+  const unansweredQuery = `
+    SELECT c.id,
+           lm.created_at AS last_msg_at,
+           COALESCE(lm.author_type, '') AS lastAuthor,
+           COALESCE(lm.body, '') AS body
+    FROM conversations c
+    JOIN messages lm ON lm.conversation_id = c.id
+      AND lm.created_at = (
+        SELECT MAX(m2.created_at) FROM messages m2
+        WHERE m2.conversation_id = c.id AND m2.part_type = 'comment'
+      )
+    WHERE c.updated_at > ?
+      AND lm.author_type IN ('user', 'lead', 'contact')
+    ORDER BY lm.created_at ASC
+  `;
 
-  for (const conv of recent) {
-    const msgs = conv.messages;
-    if (!msgs.length) continue;
+  if (filter === "unanswered" || filter === "waiting1h") {
+    const allUnanswered = db.prepare(unansweredQuery).all(sevenDaysAgo) as Array<{
+      id: string; last_msg_at: number; lastAuthor: string; body: string;
+    }>;
 
-    for (let i = 0; i < msgs.length - 1; i++) {
-      if (isCustomer(msgs[i].author) && isManager(msgs[i + 1].author)) {
-        const diff =
-          new Date(msgs[i + 1].date).getTime() - new Date(msgs[i].date).getTime();
-        if (diff > 0 && diff < sevenDaysMs) responseTimes.push(diff);
-      }
+    const items = allUnanswered.map(r => ({
+      id: r.id,
+      waitingMs: Date.now() - r.last_msg_at * 1000,
+      lastAuthor: r.lastAuthor,
+      lastDate: new Date(r.last_msg_at * 1000).toISOString(),
+      preview: r.body.slice(0, 120),
+    }));
+
+    if (filter === "waiting1h") {
+      const over1h = items.filter(i => i.waitingMs > oneHourMs);
+      const list = over1h.slice((page - 1) * pageSize, page * pageSize);
+      return Response.json({ list, total: over1h.length, page, pageSize });
     }
 
-    const lastMsg = msgs[msgs.length - 1];
-    if (isCustomer(lastMsg.author)) {
-      unansweredItems.push({
-        id: conv.conversation_id,
-        waitingMs: now - new Date(lastMsg.date).getTime(),
-        lastAuthor: lastMsg.author,
-        lastDate: lastMsg.date,
-        preview: lastMsg.body.slice(0, 120),
-      });
-    }
+    const list = items.slice((page - 1) * pageSize, page * pageSize);
+    return Response.json({ list, total: items.length, page, pageSize });
   }
 
-  unansweredItems.sort((a, b) => b.waitingMs - a.waitingMs);
-
-  if (filter === "unanswered") {
-    const list = unansweredItems.slice((page - 1) * pageSize, page * pageSize);
-    return Response.json({ list, total: unansweredItems.length, page, pageSize });
-  }
-
-  if (filter === "waiting1h") {
-    const over1h = unansweredItems.filter((i) => i.waitingMs > 60 * 60 * 1000);
-    const list = over1h.slice((page - 1) * pageSize, page * pageSize);
-    return Response.json({ list, total: over1h.length, page, pageSize });
-  }
-
-  // Build duplicates: group recent conversations by customer email, keep groups with >1 conv
-  const teammateEmails = loadTeammateEmails();
-  const adminIdNames = loadAdminIdNames();
-  function isTeammate(author: string): boolean {
-    return author.endsWith("@intercom.io") || teammateEmails.has(author.toLowerCase());
-  }
-
-  type ConvEntry = { id: string; updated_at: string; preview: string; assignee: string };
-  const emailMap = new Map<string, ConvEntry[]>();
-  for (const conv of conversations) {
-    // Customer = first non-bot, non-teammate author with email (initiator)
-    let customerEmail: string | null = null;
-    for (const msg of conv.messages) {
-      const a = msg.author;
-      if (a.endsWith("@intercom.io")) continue;
-      if (!a.includes("@")) break;
-      if (isTeammate(a)) continue;
-      customerEmail = a;
-      break;
-    }
-    if (!customerEmail) continue;
-
-    // Only include conversations where customer wrote in the last 7 days
-    let customerLastMsgTime = 0;
-    for (let i = conv.messages.length - 1; i >= 0; i--) {
-      if (conv.messages[i].author === customerEmail) {
-        customerLastMsgTime = new Date(conv.messages[i].date).getTime();
-        break;
-      }
-    }
-    if (customerLastMsgTime < now - sevenDaysMs) continue;
-
-    // Assignee from Intercom admin_assignee_id
-    const assigneeId = conv.admin_assignee_id;
-    if (!assigneeId) continue; // skip unassigned conversations
-    const assignee = adminIdNames.get(assigneeId) || `Admin #${assigneeId}`;
-    const lastMsg = conv.messages[conv.messages.length - 1];
-    const preview = lastMsg?.body?.slice(0, 80) || "";
-    if (!emailMap.has(customerEmail)) emailMap.set(customerEmail, []);
-    emailMap.get(customerEmail)!.push({ id: conv.conversation_id, updated_at: conv.updated_at, preview, assignee });
-  }
-
-  // Duplicate = one customer email has conversations assigned to DIFFERENT managers
-  const duplicateGroups = [...emailMap.entries()]
-    .map(([email, convs]) => {
-      const uniqueAssignees = [...new Set(convs.map((c) => c.assignee))];
-      return { email, convs, uniqueAssignees };
-    })
-    .filter(({ uniqueAssignees }) => uniqueAssignees.length > 1) // >1 different assignee = duplicate
-    .map(({ email, convs, uniqueAssignees }) => {
-      const sorted = convs.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-      return {
-        email,
-        chatsCount: convs.length,
-        managersCount: uniqueAssignees.length,
-        managers: uniqueAssignees,
-        conversations: sorted.map(({ id, updated_at, preview, assignee }) => ({ id, updated_at, preview, assignee })),
-      };
-    })
-    .sort((a, b) => b.managersCount - a.managersCount || b.chatsCount - a.chatsCount);
-
+  // ---------- filter: duplicates ----------
   if (filter === "duplicates") {
     const q = (searchParams.get("q") || "").toLowerCase().trim();
-    const filtered = q
-      ? duplicateGroups.filter((g) => g.email.toLowerCase().includes(q))
-      : duplicateGroups;
-    const list = filtered.slice((page - 1) * pageSize, page * pageSize);
-    return Response.json({ list, total: filtered.length, page, pageSize });
+
+    // Find emails with conversations assigned to >1 different admin, active in last 7 days
+    const dupRows = db.prepare(`
+      SELECT c.contact_email AS email,
+             c.id,
+             c.updated_at,
+             COALESCE(SUBSTR(lm.body, 1, 80), '') AS preview,
+             COALESCE(a.name, 'Admin #' || c.admin_assignee_id) AS assignee,
+             c.admin_assignee_id
+      FROM conversations c
+      LEFT JOIN messages lm ON lm.conversation_id = c.id
+        AND lm.created_at = (SELECT MAX(m2.created_at) FROM messages m2 WHERE m2.conversation_id = c.id AND m2.part_type = 'comment')
+      LEFT JOIN admins a ON a.id = c.admin_assignee_id
+      WHERE c.contact_email IS NOT NULL
+        AND c.contact_email != ''
+        AND c.admin_assignee_id IS NOT NULL
+        AND c.updated_at > ?
+        AND c.contact_email NOT IN (
+          SELECT email FROM admins WHERE email IS NOT NULL
+        )
+      ORDER BY c.contact_email, c.updated_at DESC
+    `).all(sevenDaysAgo) as Array<{
+      email: string; id: string; updated_at: number; preview: string; assignee: string; admin_assignee_id: string;
+    }>;
+
+    // Group by email, keep only groups with >1 unique assignee
+    const emailMap = new Map<string, typeof dupRows>();
+    for (const row of dupRows) {
+      if (!emailMap.has(row.email)) emailMap.set(row.email, []);
+      emailMap.get(row.email)!.push(row);
+    }
+
+    let groups = [...emailMap.entries()]
+      .map(([email, convs]) => {
+        const uniqueAssignees = [...new Set(convs.map(c => c.assignee))];
+        if (uniqueAssignees.length <= 1) return null;
+        return {
+          email,
+          chatsCount: convs.length,
+          managersCount: uniqueAssignees.length,
+          managers: uniqueAssignees,
+          conversations: convs.map(c => ({
+            id: c.id,
+            updated_at: new Date(c.updated_at * 1000).toISOString(),
+            preview: c.preview,
+            assignee: c.assignee,
+          })),
+        };
+      })
+      .filter(Boolean) as Array<NonNullable<ReturnType<typeof Object.create>>>;
+
+    groups.sort((a: { managersCount: number; chatsCount: number }, b: { managersCount: number; chatsCount: number }) =>
+      b.managersCount - a.managersCount || b.chatsCount - a.chatsCount
+    );
+
+    if (q) {
+      groups = groups.filter((g: { email: string }) => g.email.toLowerCase().includes(q));
+    }
+
+    const list = groups.slice((page - 1) * pageSize, page * pageSize);
+    return Response.json({ list, total: groups.length, page, pageSize });
   }
 
-  const avgResponseMs =
-    responseTimes.length > 0
-      ? Math.round(responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length)
-      : null;
+  // ---------- Summary (no filter) ----------
+  const inWork = (db.prepare(
+    `SELECT COUNT(*) AS n FROM conversations WHERE updated_at > ?`
+  ).get(sevenDaysAgo) as { n: number }).n;
+
+  const unansweredCount = (db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM conversations c
+    JOIN messages lm ON lm.conversation_id = c.id
+      AND lm.created_at = (
+        SELECT MAX(m2.created_at) FROM messages m2
+        WHERE m2.conversation_id = c.id AND m2.part_type = 'comment'
+      )
+    WHERE c.updated_at > ?
+      AND lm.author_type IN ('user', 'lead', 'contact')
+  `).get(sevenDaysAgo) as { n: number }).n;
+
+  const oneHourAgo = nowSec - 3600;
+  const waitingOver1h = (db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM conversations c
+    JOIN messages lm ON lm.conversation_id = c.id
+      AND lm.created_at = (
+        SELECT MAX(m2.created_at) FROM messages m2
+        WHERE m2.conversation_id = c.id AND m2.part_type = 'comment'
+      )
+    WHERE c.updated_at > ?
+      AND lm.author_type IN ('user', 'lead', 'contact')
+      AND lm.created_at < ?
+  `).get(sevenDaysAgo, oneHourAgo) as { n: number }).n;
+
+  // Average first response time (only conversations with a first response)
+  const avgRow = db.prepare(`
+    SELECT AVG(first_response_seconds) AS avg_frt
+    FROM conversations
+    WHERE updated_at > ? AND first_response_seconds IS NOT NULL AND first_response_seconds > 0
+  `).get(sevenDaysAgo) as { avg_frt: number | null };
+  const avgResponseMs = avgRow.avg_frt != null ? Math.round(avgRow.avg_frt * 1000) : null;
+
+  // Duplicates count (same logic as above but just counting)
+  const dupCountRows = db.prepare(`
+    SELECT c.contact_email AS email, COUNT(DISTINCT c.admin_assignee_id) AS n_admins
+    FROM conversations c
+    WHERE c.contact_email IS NOT NULL
+      AND c.contact_email != ''
+      AND c.admin_assignee_id IS NOT NULL
+      AND c.updated_at > ?
+      AND c.contact_email NOT IN (SELECT email FROM admins WHERE email IS NOT NULL)
+    GROUP BY c.contact_email
+    HAVING n_admins > 1
+  `).all(sevenDaysAgo) as Array<{ email: string; n_admins: number }>;
+  const duplicatesCount = dupCountRows.length;
 
   return Response.json({
-    inWork: recent.length,
-    unansweredCount: unansweredItems.length,
+    inWork,
+    unansweredCount,
     avgResponseMs,
-    waitingOver1h: unansweredItems.filter((i) => i.waitingMs > 60 * 60 * 1000).length,
-    duplicatesCount: duplicateGroups.length,
+    waitingOver1h,
+    duplicatesCount,
     computedAt: new Date().toISOString(),
-    period: new Date(now - sevenDaysMs).toISOString(),
+    period: new Date((nowSec - 7 * 24 * 60 * 60) * 1000).toISOString(),
   });
 }

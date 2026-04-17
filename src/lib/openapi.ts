@@ -20,6 +20,7 @@ export const openapiSpec = {
     { name: 'deals', description: 'Closed Deal: список сделок + ручные переопределения статуса' },
     { name: 'export', description: 'Выгрузки в CSV/JSON' },
     { name: 'sync', description: 'Состояние фоновых синхронизаций' },
+    { name: 'monitoring', description: 'Мониторинг: дежурная панель и статус каналов' },
     { name: 'health', description: 'Health checks и liveness probes' },
   ],
   components: {
@@ -788,6 +789,39 @@ export const openapiSpec = {
             },
           },
           '400': { description: 'format must be csv or json' },
+          '401': { description: 'Не авторизован' },
+        },
+      },
+    },
+    '/api/monitoring': {
+      get: {
+        tags: ['monitoring'],
+        summary: 'Сводка дежурной панели (SQLite)',
+        description:
+          'Без filter — сводные метрики (inWork, unanswered, avgResponseMs, waitingOver1h, duplicatesCount). С filter — пагинированный список.',
+        parameters: [
+          {
+            name: 'filter',
+            in: 'query',
+            schema: { type: 'string', enum: ['inWork', 'unanswered', 'waiting1h', 'duplicates'] },
+          },
+          { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
+          { name: 'q', in: 'query', schema: { type: 'string' }, description: 'Поиск по email (только для filter=duplicates)' },
+        ],
+        responses: {
+          '200': { description: 'OK' },
+          '401': { description: 'Не авторизован' },
+        },
+      },
+    },
+    '/api/monitoring/integrations': {
+      get: {
+        tags: ['monitoring'],
+        summary: 'Статус каналов (из кеша, обновляется воркером каждые 15 мин)',
+        description:
+          'Читает channel_status_cache из SQLite. Поле stale=true если кеш старше 30 минут.',
+        responses: {
+          '200': { description: 'OK' },
           '401': { description: 'Не авторизован' },
         },
       },

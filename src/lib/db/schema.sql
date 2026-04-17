@@ -201,3 +201,16 @@ CREATE TABLE IF NOT EXISTS export_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_export_status  ON export_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_export_created ON export_jobs(created_at);
+
+-- ---------- channel status cache (monitoring/integrations) ----------
+CREATE TABLE IF NOT EXISTS channel_status_cache (
+  channel         TEXT PRIMARY KEY,
+  label           TEXT NOT NULL,
+  total_open      INTEGER NOT NULL DEFAULT 0,
+  last_1h         INTEGER NOT NULL DEFAULT 0,
+  last_24h        INTEGER NOT NULL DEFAULT 0,
+  last_message_at TEXT,             -- ISO 8601
+  last_conv_id    TEXT,
+  status          TEXT NOT NULL DEFAULT 'ok',  -- ok|warning|error
+  updated_at      INTEGER NOT NULL  -- unix seconds
+);

@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { runIncremental } from './incremental';
 import { processExportJobs } from './export-job';
+import { refreshChannelStatusCache } from './channel-status';
 import { getDb } from '../src/lib/db/client';
 import { setSyncState } from '../src/lib/db/sync';
 
@@ -109,6 +110,13 @@ async function main() {
       await processExportJobs();
     } catch (err) {
       console.error('worker: export job processing failed', err);
+    }
+    // Refresh channel status cache (monitoring/integrations)
+    try {
+      console.log('worker: refreshing channel status cache...');
+      await refreshChannelStatusCache(getDb());
+    } catch (err) {
+      console.error('worker: channel status refresh failed', err);
     }
 
     if (stopping) break;
