@@ -8,6 +8,37 @@ if (!SECRET || SECRET.length < 16) {
 }
 const encoder = new TextEncoder();
 
+// --- CORS for cross-origin CRM frontend ---
+const ALLOWED_ORIGINS = new Set([
+  "https://sales.atomgroup.dev",
+  "http://localhost:5173",
+  "http://localhost:3000",
+]);
+
+function corsHeaders(origin: string): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "GET,POST,PATCH,PUT,DELETE,OPTIONS",
+    "Access-Control-Allow-Headers":
+      "Content-Type,Accept,X-Requested-With,X-CSRF-Token",
+    "Access-Control-Expose-Headers": "Content-Type,Set-Cookie",
+    Vary: "Origin",
+  };
+}
+
+function applyCors(
+  res: NextResponse,
+  origin: string | null,
+): NextResponse {
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    for (const [k, v] of Object.entries(corsHeaders(origin))) {
+      res.headers.set(k, v);
+    }
+  }
+  return res;
+}
+
 async function verifyTokenEdge(token: string): Promise<boolean> {
   try {
     const lastDot = token.lastIndexOf(".");
@@ -41,6 +72,15 @@ async function verifyTokenEdge(token: string): Promise<boolean> {
 
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
+  const origin = req.headers.get("origin");
+
+  // CORS preflight for API routes
+  if (req.method === "OPTIONS" && pathname.startsWith("/api/") && origin && ALLOWED_ORIGINS.has(origin)) {
+    return new NextResponse(null, {
+      status: 204,
+      headers: corsHeaders(origin),
+    });
+  }
 
   // Allow public paths
   if (
@@ -52,7 +92,7 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/_next/") ||
     pathname.startsWith("/favicon")
   ) {
-    return NextResponse.next();
+    return applyCors(NextResponse.next(), origin);
   }
 
   const token = req.cookies.get("session")?.value;
@@ -60,7 +100,10 @@ export async function proxy(req: NextRequest) {
   if (!token || !(await verifyTokenEdge(token))) {
     // API requests → 401
     if (pathname.startsWith("/api/")) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return applyCors(
+        NextResponse.json({ error: "Unauthorized" }, { status: 401 }),
+        origin,
+      );
     }
     // Page requests → redirect to login
     const loginUrl = new URL("/login", req.url);
@@ -68,7 +111,7 @@ export async function proxy(req: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  return NextResponse.next();
+  return applyCors(NextResponse.next(), origin);
 }
 
 export const config = {
