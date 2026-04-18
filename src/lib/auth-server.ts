@@ -1,8 +1,16 @@
 // Server-side request guards. Use these in every API route that requires
 // authentication or specific roles. Never trust client-supplied user info.
 
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { verifyToken, type SessionUser } from "./auth";
+
+const SERVICE_TOKEN = process.env.SERVICE_TOKEN || "";
+
+const SERVICE_USER: SessionUser = {
+  username: "merkle-crm",
+  role: "admin",
+  displayName: "Merkle CRM (service)",
+};
 
 export class AuthError extends Error {
   status: number;
@@ -13,6 +21,17 @@ export class AuthError extends Error {
 }
 
 export async function getSessionUser(): Promise<SessionUser | null> {
+  // 1) Service Bearer token — takes priority
+  if (SERVICE_TOKEN) {
+    const hdrs = await headers();
+    const auth = hdrs.get("authorization") || "";
+    if (auth.startsWith("Bearer ")) {
+      const token = auth.slice(7).trim();
+      if (token === SERVICE_TOKEN) return SERVICE_USER;
+    }
+  }
+
+  // 2) Session cookie
   const jar = await cookies();
   const token = jar.get("session")?.value;
   if (!token) return null;
