@@ -14,10 +14,12 @@ export async function POST(req: NextRequest) {
     logActivity(session.username, session.role, "logout", {});
   }
 
+  const isHttps = req.headers.get("x-forwarded-proto") === "https"
+    || req.url.startsWith("https");
   cookieStore.set("session", "", {
     httpOnly: true,
-    secure: true,
-    sameSite: "none",
+    secure: isHttps,
+    sameSite: isHttps ? "none" : "lax",
     path: "/",
     maxAge: 0,
   });

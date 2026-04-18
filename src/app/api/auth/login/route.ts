@@ -48,11 +48,13 @@ export async function POST(req: NextRequest) {
   }
 
   const token = createToken(session.username, session.role);
+  const isHttps = req.headers.get("x-forwarded-proto") === "https"
+    || req.url.startsWith("https");
   const cookieStore = await cookies();
   cookieStore.set("session", token, {
     httpOnly: true,
-    secure: true,
-    sameSite: "none",
+    secure: isHttps,
+    sameSite: isHttps ? "none" : "lax",
     path: "/",
     maxAge: 24 * 60 * 60,
   });
