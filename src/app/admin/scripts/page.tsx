@@ -172,7 +172,7 @@ export default function ScriptsPage() {
               className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 transition-colors"
             >
               <ArrowLeft className="w-4 h-4" />
-              На главную
+              Админ-панель
             </a>
             <span className="text-gray-300">|</span>
             <h1 className="text-sm font-semibold text-gray-900 flex items-center gap-1.5">

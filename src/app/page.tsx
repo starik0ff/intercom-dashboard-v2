@@ -1,123 +1,110 @@
 'use client';
 
-// Landing dashboard for v2. Shows KPI funnel + source breakdown driven by
-// the global filter bar, plus navigation tiles to the main sections.
-
 import Link from 'next/link';
-import { Suspense, useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import {
   Activity,
-  BarChart2,
   ClipboardList,
+  Database,
   HeartPulse,
-  Terminal,
   LogOut,
-  Search,
+  MessageSquare,
+  RefreshCw,
+  Settings,
   Shield,
-  Trophy,
+  Terminal,
   Users,
+  AlertTriangle,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
-import { GlobalFilterBar } from '@/components/GlobalFilterBar';
-import { useGlobalFilters, filtersToQueryString } from '@/hooks/useGlobalFilters';
-import { SOURCE_LABELS, type SourceBucket } from '@/lib/filters/types';
 import type { SessionUser } from '@/lib/auth';
 
-interface FunnelResp {
-  stages: { key: string; label: string; value: number }[];
-  no_reply: number;
+interface SyncStatus {
+  totals: { conversations: number; messages: number };
+  bootstrap: { completed_at: string | null };
+  incremental: {
+    last_run_at: string | null;
+    last_processed: number;
+    cursor: number | null;
+  };
+  worker: { started_at: string | null };
+  errors: { last_24h: number; recent: { scope: string; message: string; ts: string }[] };
 }
 
-interface SourceRow {
-  source_bucket: string;
-  n: number;
+interface HealthResp {
+  status: 'ok' | 'warn' | 'fail';
+  checks: { name: string; status: 'ok' | 'warn' | 'fail'; ms: number; detail?: string }[];
 }
 
-interface SourceResp {
-  total: number;
-  items: SourceRow[];
+interface Stats {
+  totalConversations: number;
+  totalAuthors: number;
+  dateRange: { min: string; max: string };
 }
 
 function fmtNum(n: number): string {
   return n.toLocaleString('ru-RU');
 }
 
-function pct(n: number, total: number): string {
-  if (!total) return '0%';
-  return `${Math.round((n / total) * 100)}%`;
+function relativeTime(iso: string | null): string {
+  if (!iso) return 'нет данных';
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'только что';
+  if (mins < 60) return `${mins} мин назад`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} ч назад`;
+  const days = Math.floor(hours / 24);
+  return `${days} дн назад`;
 }
 
-export default function Home() {
-  return (
-    <Suspense fallback={<div className="p-4 text-sm text-gray-500">Загрузка…</div>}>
-      <Inner />
-    </Suspense>
-  );
-}
-
-function Inner() {
-  const { filters, key } = useGlobalFilters();
-  const qs = filtersToQueryString(filters);
-
+export default function AdminHome() {
   const [user, setUser] = useState<SessionUser | null>(null);
-  const [funnel, setFunnel] = useState<FunnelResp | null>(null);
-  const [sources, setSources] = useState<SourceResp | null>(null);
+  const [sync, setSync] = useState<SyncStatus | null>(null);
+  const [health, setHealth] = useState<HealthResp | null>(null);
+  const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetch('/api/auth/me')
-      .then((r) => r.json())
-      .then((d) => setUser(d.user || null))
-      .catch(() => null);
+  const fetchAll = useCallback(() => {
+    setLoading(true);
+    Promise.all([
+      fetch('/api/auth/me').then(r => r.json()).then(d => setUser(d.user || null)).catch(() => null),
+      fetch('/api/sync-status').then(r => r.ok ? r.json() : null).then(setSync).catch(() => null),
+      fetch('/api/health/full?probe=0').then(r => r.ok ? r.json() : null).then(setHealth).catch(() => null),
+      fetch('/api/stats').then(r => r.ok ? r.json() : null).then(setStats).catch(() => null),
+    ]).finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    Promise.all([
-      fetch(`/api/traffic/funnel?${qs}`).then((r) => {
-        if (!r.ok) throw new Error(`funnel ${r.status}`);
-        return r.json() as Promise<FunnelResp>;
-      }),
-      fetch(`/api/traffic/by-source?${qs}`).then((r) => {
-        if (!r.ok) throw new Error(`by-source ${r.status}`);
-        return r.json() as Promise<SourceResp>;
-      }),
-    ])
-      .then(([f, s]) => {
-        if (cancelled) return;
-        setFunnel(f);
-        setSources(s);
-      })
-      .catch((e) => !cancelled && setError(String(e)))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [qs, key]);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
 
   async function handleLogout() {
     await fetch('/api/auth/logout', { method: 'POST' });
     window.location.href = '/login';
   }
 
-  const total = funnel?.stages.find((s) => s.key === 'total')?.value ?? 0;
-  const firstReply = funnel?.stages.find((s) => s.key === 'first_reply')?.value ?? 0;
-  const closed = funnel?.stages.find((s) => s.key === 'closed')?.value ?? 0;
-  const closedDeal = funnel?.stages.find((s) => s.key === 'closed_deal')?.value ?? 0;
-  const noReply = funnel?.no_reply ?? 0;
+  const healthColor = {
+    ok: 'text-green-600 bg-green-100',
+    warn: 'text-yellow-600 bg-yellow-100',
+    fail: 'text-red-600 bg-red-100',
+  };
+
+  const healthIcon = {
+    ok: <CheckCircle2 className="w-4 h-4" />,
+    warn: <AlertTriangle className="w-4 h-4" />,
+    fail: <XCircle className="w-4 h-4" />,
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b border-gray-200">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
-          <Shield className="w-6 h-6 text-blue-600 shrink-0" />
+          <Settings className="w-6 h-6 text-blue-600 shrink-0" />
           <div className="min-w-0 flex-1">
             <h1 className="text-base sm:text-lg font-semibold text-gray-900 truncate">
-              Intercom Dashboard
+              Админ-панель
             </h1>
-            <p className="text-xs text-gray-500 truncate">Аналитика и аудит диалогов</p>
+            <p className="text-xs text-gray-500 truncate">Intercom Dashboard — управление и мониторинг</p>
           </div>
           {user && (
             <div className="flex items-center gap-2 shrink-0">
@@ -125,36 +112,13 @@ function Inner() {
                 <span className="font-medium text-gray-900">{user.displayName}</span>
                 <span className="text-gray-400 ml-1">({user.username})</span>
               </span>
-              {user.role === 'admin' && (
-                <Link
-                  href="/admin/health"
-                  title="Health"
-                  className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 p-1.5 sm:px-3 sm:py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  <HeartPulse className="w-4 h-4" />
-                  <span className="hidden md:inline">Health</span>
-                </Link>
-              )}
-              {user.role === 'admin' && (
-                <Link
-                  href="/admin/logs"
-                  title="Логи"
-                  className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 p-1.5 sm:px-3 sm:py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  <ClipboardList className="w-4 h-4" />
-                  <span className="hidden md:inline">Логи</span>
-                </Link>
-              )}
-              {user.role === 'admin' && (
-                <Link
-                  href="/admin/scripts"
-                  title="Скрипты"
-                  className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 p-1.5 sm:px-3 sm:py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  <Terminal className="w-4 h-4" />
-                  <span className="hidden md:inline">Скрипты</span>
-                </Link>
-              )}
+              <button
+                onClick={fetchAll}
+                title="Обновить"
+                className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 p-1.5 sm:px-3 sm:py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
               <button
                 type="button"
                 onClick={handleLogout}
@@ -169,210 +133,179 @@ function Inner() {
         </div>
       </header>
 
-      <GlobalFilterBar />
-
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
-        {error && (
-          <div className="rounded border border-red-200 bg-red-50 text-sm text-red-700 p-3">
-            Ошибка загрузки: {error}
+        {loading && !stats && (
+          <div className="text-center py-16">
+            <div className="inline-block w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+            <p className="text-sm text-gray-500 mt-3">Загрузка...</p>
           </div>
         )}
 
-        {/* KPI row */}
-        <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <KpiCard
-            label="Всего диалогов"
-            value={fmtNum(total)}
-            hint={loading ? 'загрузка…' : 'по текущим фильтрам'}
-            accent="blue"
-          />
-          <KpiCard
-            label="С первым ответом"
-            value={fmtNum(firstReply)}
-            hint={pct(firstReply, total) + ' от всех'}
-            accent="indigo"
-          />
-          <KpiCard
-            label="Закрыто"
-            value={fmtNum(closed)}
-            hint={pct(closed, total) + ' от всех'}
-            accent="gray"
-          />
-          <KpiCard
-            label="Closed Deal"
-            value={fmtNum(closedDeal)}
-            hint={pct(closedDeal, total) + ' от всех'}
-            accent="green"
-          />
-        </section>
-
-        {/* Source breakdown + no-reply callout */}
-        <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div className="md:col-span-2 bg-white border border-gray-200 rounded p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-gray-900">По источникам</h2>
-              <Link
-                href={`/traffic?${qs}`}
-                className="text-xs text-blue-600 hover:text-blue-800"
-              >
-                подробнее →
-              </Link>
-            </div>
-            {sources && sources.items.length > 0 ? (
-              <div className="space-y-2">
-                {sources.items.map((r) => {
-                  const p = sources.total ? (r.n / sources.total) * 100 : 0;
-                  return (
-                    <div key={r.source_bucket} className="flex items-center gap-3 text-sm">
-                      <div className="w-28 text-gray-700 shrink-0">
-                        {SOURCE_LABELS[r.source_bucket as SourceBucket] ?? r.source_bucket}
-                      </div>
-                      <div className="flex-1 bg-gray-100 rounded h-2 overflow-hidden">
-                        <div
-                          className="bg-blue-500 h-full"
-                          style={{ width: `${p}%` }}
-                        />
-                      </div>
-                      <div className="w-20 text-right tabular-nums text-gray-700">
-                        {fmtNum(r.n)}
-                      </div>
-                      <div className="w-10 text-right tabular-nums text-gray-400 text-xs">
-                        {Math.round(p)}%
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="text-sm text-gray-400 py-4 text-center">
-                {loading ? 'Загрузка…' : 'Нет данных'}
-              </div>
-            )}
-          </div>
-
-          <div className="bg-white border border-gray-200 rounded p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Activity className="w-4 h-4 text-red-500" />
-              <h2 className="text-sm font-semibold text-gray-900">Без ответа</h2>
-            </div>
-            <div className="text-3xl font-bold text-red-600 tabular-nums">
-              {fmtNum(noReply)}
-            </div>
-            <p className="text-xs text-gray-500 mt-1">
-              диалогов в статусе «без ответа» по текущим фильтрам
-            </p>
-            <Link
-              href={`/search?${qs}&statuses=no_reply`}
-              className="inline-block mt-3 text-xs text-blue-600 hover:text-blue-800"
-            >
-              открыть список →
-            </Link>
-          </div>
-        </section>
-
-        {/* Navigation tiles */}
-        <section>
-          <h2 className="text-sm font-semibold text-gray-900 mb-3">Разделы</h2>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            <NavTile
-              href={`/search?${qs}`}
-              icon={<Search className="w-5 h-5" />}
-              title="Поиск"
-              desc="Полнотекстовый поиск по всем сообщениям (FTS5)"
-            />
-            <NavTile
-              href={`/closed-deals?${qs}`}
-              icon={<Trophy className="w-5 h-5" />}
-              title="Closed Deals"
-              desc="Диалоги с ручной пометкой «сделка закрыта»"
-            />
-            <NavTile
-              href={`/traffic?${qs}`}
-              icon={<BarChart2 className="w-5 h-5" />}
-              title="Трафик"
-              desc="Динамика обращений, источники, воронка"
-            />
-            <NavTile
-              href={`/team?${qs}`}
-              icon={<Users className="w-5 h-5" />}
-              title="Команда"
-              desc="Статистика по менеджерам и нагрузка"
-            />
-            <NavTile
-              href={`/monitoring?${qs}`}
-              icon={<Activity className="w-5 h-5" />}
-              title="Мониторинг"
-              desc="SLA, время ответа, аномалии"
-            />
-            {user?.role === 'admin' && (
-              <NavTile
-                href="/admin/health"
-                icon={<HeartPulse className="w-5 h-5" />}
-                title="Health checks"
-                desc="Состояние БД, воркера, Intercom API"
+        {stats && (
+          <>
+            {/* KPI */}
+            <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <KpiCard label="Диалогов" value={fmtNum(stats.totalConversations)} icon={<MessageSquare className="w-4 h-4" />} accent="blue" />
+              <KpiCard label="Сообщений" value={fmtNum(sync?.totals.messages ?? 0)} icon={<Database className="w-4 h-4" />} accent="indigo" />
+              <KpiCard label="Авторов" value={fmtNum(stats.totalAuthors)} icon={<Users className="w-4 h-4" />} accent="green" />
+              <KpiCard
+                label="Ошибки 24ч"
+                value={fmtNum(sync?.errors.last_24h ?? 0)}
+                icon={<AlertTriangle className="w-4 h-4" />}
+                accent={(sync?.errors.last_24h ?? 0) > 0 ? 'red' : 'gray'}
               />
-            )}
-          </div>
-        </section>
+            </section>
 
-        <div className="text-xs text-gray-400 pt-2">
-          API / документация:{' '}
-          <Link href="/api" className="text-blue-600 hover:text-blue-800">
-            Swagger UI
-          </Link>{' '}
-          ·{' '}
-          <Link href="/api/openapi.json" className="text-blue-600 hover:text-blue-800">
-            openapi.json
-          </Link>
-        </div>
+            {/* Health + Sync widgets */}
+            <section className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Health */}
+              <div className="bg-white border border-gray-200 rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                    <HeartPulse className="w-4 h-4 text-blue-600" />
+                    Health
+                  </h2>
+                  {health && (
+                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${healthColor[health.status]}`}>
+                      {healthIcon[health.status]}
+                      {health.status.toUpperCase()}
+                    </span>
+                  )}
+                </div>
+                {health ? (
+                  <div className="space-y-2">
+                    {health.checks.map((c) => (
+                      <div key={c.name} className="flex items-center justify-between text-sm">
+                        <div className="flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full ${c.status === 'ok' ? 'bg-green-500' : c.status === 'warn' ? 'bg-yellow-500' : 'bg-red-500'}`} />
+                          <span className="text-gray-700">{c.name}</span>
+                        </div>
+                        <span className="text-xs text-gray-400 tabular-nums">{c.ms}ms</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400">Загрузка...</p>
+                )}
+                <Link href="/admin/health" className="inline-block mt-4 text-xs text-blue-600 hover:text-blue-800">
+                  Подробнее →
+                </Link>
+              </div>
+
+              {/* Sync */}
+              <div className="bg-white border border-gray-200 rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                    <RefreshCw className="w-4 h-4 text-blue-600" />
+                    Синхронизация
+                  </h2>
+                </div>
+                {sync ? (
+                  <div className="space-y-3">
+                    <InfoRow label="Последний sync" value={relativeTime(sync.incremental.last_run_at)} />
+                    <InfoRow label="Обработано" value={`${sync.incremental.last_processed} диалогов`} />
+                    <InfoRow label="Worker uptime" value={relativeTime(sync.worker.started_at)} />
+                    <InfoRow label="Bootstrap" value={sync.bootstrap.completed_at ? new Date(sync.bootstrap.completed_at).toLocaleDateString('ru-RU') : 'не завершён'} />
+                    {sync.errors.last_24h > 0 && (
+                      <div className="mt-2 p-2 bg-red-50 rounded-lg text-xs text-red-700">
+                        {sync.errors.last_24h} ошибок за 24ч
+                        {sync.errors.recent.length > 0 && (
+                          <div className="mt-1 text-red-500 truncate">
+                            Последняя: {sync.errors.recent[0].message}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400">Загрузка...</p>
+                )}
+              </div>
+            </section>
+
+            {/* Nav tiles */}
+            <section>
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">Управление</h2>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <NavTile
+                  href="/monitoring"
+                  icon={<Activity className="w-5 h-5" />}
+                  title="Мониторинг"
+                  desc="Каналы, SLA, без ответа, дубли"
+                />
+                <NavTile
+                  href="/admin/scripts"
+                  icon={<Terminal className="w-5 h-5" />}
+                  title="Скрипты"
+                  desc="Запуск сервисных скриптов"
+                />
+                <NavTile
+                  href="/admin/health"
+                  icon={<HeartPulse className="w-5 h-5" />}
+                  title="Health checks"
+                  desc="Состояние БД, воркера, Intercom API"
+                />
+                <NavTile
+                  href="/admin/logs"
+                  icon={<ClipboardList className="w-5 h-5" />}
+                  title="Логи"
+                  desc="Журнал активности пользователей"
+                />
+                <NavTile
+                  href="/api"
+                  icon={<Shield className="w-5 h-5" />}
+                  title="Swagger API"
+                  desc="Документация и тестирование API"
+                />
+              </div>
+            </section>
+          </>
+        )}
       </main>
     </div>
   );
 }
 
-function KpiCard({
-  label,
-  value,
-  hint,
-  accent,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-  accent: 'blue' | 'indigo' | 'green' | 'gray';
+function KpiCard({ label, value, icon, accent }: {
+  label: string; value: string; icon: React.ReactNode;
+  accent: 'blue' | 'indigo' | 'green' | 'gray' | 'red';
 }) {
-  const accentMap: Record<string, string> = {
-    blue: 'text-blue-600',
-    indigo: 'text-indigo-600',
-    green: 'text-green-600',
-    gray: 'text-gray-700',
+  const colors: Record<string, string> = {
+    blue: 'text-blue-600 bg-blue-50',
+    indigo: 'text-indigo-600 bg-indigo-50',
+    green: 'text-green-600 bg-green-50',
+    gray: 'text-gray-600 bg-gray-50',
+    red: 'text-red-600 bg-red-50',
   };
   return (
-    <div className="bg-white border border-gray-200 rounded p-4">
-      <div className="text-xs text-gray-500 uppercase tracking-wide">{label}</div>
-      <div className={`text-3xl font-bold tabular-nums mt-1 ${accentMap[accent]}`}>
+    <div className="bg-white border border-gray-200 rounded-xl p-4">
+      <div className="flex items-center gap-2 mb-2">
+        <span className={`p-1.5 rounded-lg ${colors[accent]}`}>{icon}</span>
+        <span className="text-xs text-gray-500 uppercase tracking-wide">{label}</span>
+      </div>
+      <div className={`text-2xl font-bold tabular-nums ${accent === 'red' ? 'text-red-600' : 'text-gray-900'}`}>
         {value}
       </div>
-      <div className="text-xs text-gray-400 mt-1">{hint}</div>
     </div>
   );
 }
 
-function NavTile({
-  href,
-  icon,
-  title,
-  desc,
-}: {
-  href: string;
-  icon: React.ReactNode;
-  title: string;
-  desc: string;
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between text-sm">
+      <span className="text-gray-500">{label}</span>
+      <span className="text-gray-900 font-medium">{value}</span>
+    </div>
+  );
+}
+
+function NavTile({ href, icon, title, desc }: {
+  href: string; icon: React.ReactNode; title: string; desc: string;
 }) {
   return (
     <Link
       href={href}
-      className="block bg-white border border-gray-200 rounded p-4 hover:border-blue-400 hover:shadow-sm transition"
+      className="block bg-white border border-gray-200 rounded-xl p-4 hover:border-blue-400 hover:shadow-sm transition"
     >
       <div className="flex items-center gap-2 text-blue-600 mb-1">
         {icon}

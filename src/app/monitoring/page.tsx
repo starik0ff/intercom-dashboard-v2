@@ -299,7 +299,7 @@ function MonitoringPageInner() {
             className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
-            Аудит
+            Админ-панель
           </Link>
           <div className="ml-2">
             <h1 className="text-xl font-bold text-gray-900">Мониторинг диалогов</h1>

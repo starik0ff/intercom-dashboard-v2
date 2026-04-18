@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Аудит диалогов Intercom",
-  description: "Поиск и просмотр переписок Intercom для аудита",
+  title: "Админ-панель Intercom",
+  description: "Администрирование, мониторинг и диагностика Intercom-интеграции",
 };
 
 export default function RootLayout({
