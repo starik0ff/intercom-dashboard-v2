@@ -22,6 +22,7 @@ export const openapiSpec = {
     { name: 'sync', description: 'Состояние фоновых синхронизаций' },
     { name: 'monitoring', description: 'Мониторинг: дежурная панель и статус каналов' },
     { name: 'health', description: 'Health checks и liveness probes' },
+    { name: 'scripts', description: 'Запуск скриптов обслуживания (admin-only)' },
   ],
   components: {
     securitySchemes: {
@@ -879,6 +880,93 @@ export const openapiSpec = {
         responses: {
           '200': { description: 'OK' },
           '401': { description: 'Не авторизован' },
+        },
+      },
+    },
+    '/api/admin/scripts': {
+      get: {
+        tags: ['scripts'],
+        summary: 'Список доступных скриптов',
+        description: 'Возвращает массив скриптов с описанием и аргументами. Только для admin.',
+        responses: {
+          '200': {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    scripts: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'string' },
+                          name: { type: 'string' },
+                          description: { type: 'string' },
+                          dangerous: { type: 'boolean' },
+                          args: {
+                            type: 'array',
+                            items: {
+                              type: 'object',
+                              properties: {
+                                name: { type: 'string' },
+                                label: { type: 'string' },
+                                type: { type: 'string', enum: ['string', 'boolean'] },
+                                required: { type: 'boolean' },
+                                placeholder: { type: 'string' },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '403': { description: 'Доступ запрещён' },
+        },
+      },
+    },
+    '/api/admin/scripts/run': {
+      post: {
+        tags: ['scripts'],
+        summary: 'Запустить скрипт',
+        description: 'Запускает указанный скрипт и стримит stdout/stderr в ответе. Только для admin.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['script'],
+                properties: {
+                  script: { type: 'string', description: 'ID скрипта (например retag-conversations)' },
+                  args: {
+                    type: 'array',
+                    description: 'Аргументы скрипта',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        flag: { type: 'string', description: 'Флаг (например --admin-id)' },
+                        value: { type: 'string', description: 'Значение аргумента' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Streaming text output',
+            content: { 'text/plain': { schema: { type: 'string' } } },
+          },
+          '400': { description: 'Неизвестный скрипт или некорректные параметры' },
+          '403': { description: 'Доступ запрещён' },
         },
       },
     },

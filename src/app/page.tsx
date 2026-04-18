@@ -10,6 +10,7 @@ import {
   BarChart2,
   ClipboardList,
   HeartPulse,
+  Terminal,
   LogOut,
   Search,
   Shield,
@@ -142,6 +143,16 @@ function Inner() {
                 >
                   <ClipboardList className="w-4 h-4" />
                   <span className="hidden md:inline">Логи</span>
+                </Link>
+              )}
+              {user.role === 'admin' && (
+                <Link
+                  href="/admin/scripts"
+                  title="Скрипты"
+                  className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 p-1.5 sm:px-3 sm:py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  <Terminal className="w-4 h-4" />
+                  <span className="hidden md:inline">Скрипты</span>
                 </Link>
               )}
               <button
