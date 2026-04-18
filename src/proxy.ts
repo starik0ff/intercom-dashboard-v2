@@ -8,6 +8,17 @@ if (!SECRET || SECRET.length < 16) {
 }
 const encoder = new TextEncoder();
 
+// --- Service token for CRM frontend (Bearer auth) ---
+const SERVICE_TOKEN = process.env.SERVICE_TOKEN || "";
+
+function isValidServiceToken(req: NextRequest): boolean {
+  if (!SERVICE_TOKEN) return false;
+  const auth = req.headers.get("authorization");
+  if (!auth) return false;
+  const [scheme, token] = auth.split(" ", 2);
+  return scheme?.toLowerCase() === "bearer" && token === SERVICE_TOKEN;
+}
+
 // --- CORS for cross-origin CRM frontend ---
 const ALLOWED_ORIGINS = new Set([
   "https://sales.atomgroup.dev",
@@ -21,7 +32,7 @@ function corsHeaders(origin: string): Record<string, string> {
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Methods": "GET,POST,PATCH,PUT,DELETE,OPTIONS",
     "Access-Control-Allow-Headers":
-      "Content-Type,Accept,X-Requested-With,X-CSRF-Token",
+      "Content-Type,Accept,X-Requested-With,X-CSRF-Token,Authorization",
     "Access-Control-Expose-Headers": "Content-Type,Set-Cookie",
     Vary: "Origin",
   };
@@ -95,9 +106,12 @@ export async function proxy(req: NextRequest) {
     return applyCors(NextResponse.next(), origin);
   }
 
-  const token = req.cookies.get("session")?.value;
+  // Auth: service Bearer token OR session cookie
+  const hasServiceToken = isValidServiceToken(req);
+  const sessionToken = req.cookies.get("session")?.value;
+  const hasSession = sessionToken ? await verifyTokenEdge(sessionToken) : false;
 
-  if (!token || !(await verifyTokenEdge(token))) {
+  if (!hasServiceToken && !hasSession) {
     // API requests → 401
     if (pathname.startsWith("/api/")) {
       return applyCors(
