@@ -595,6 +595,124 @@ export const openapiSpec = {
         },
       },
     },
+    '/api/team/activity': {
+      get: {
+        tags: ['team'],
+        summary: 'Активность менеджеров: сообщения, время в Intercom',
+        description:
+          'Сводка по всем менеджерам: сообщения за сегодня и за период, активное время (на основе сессий с порогом 10 мин). Источник данных — таблица messages (author_type=admin, part_type=comment).',
+        parameters: [
+          { $ref: '#/components/parameters/Period' },
+          { $ref: '#/components/parameters/From' },
+          { $ref: '#/components/parameters/To' },
+        ],
+        responses: {
+          '200': {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    items: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          admin_id: { type: 'string' },
+                          name: { type: 'string', nullable: true },
+                          today_messages: { type: 'integer', description: 'Сообщений сегодня' },
+                          today_active_minutes: { type: 'integer', description: 'Активных минут сегодня' },
+                          period_messages: { type: 'integer', description: 'Сообщений за период' },
+                          period_active_minutes: { type: 'integer', description: 'Активных минут за период' },
+                          avg_daily_messages: { type: 'number', description: 'Среднее сообщений в день' },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '401': { description: 'Не авторизован' },
+        },
+      },
+    },
+    '/api/team/admin/{id}/activity': {
+      get: {
+        tags: ['team'],
+        summary: 'Детальная активность менеджера: daily, hourly, сессии',
+        description:
+          'Подробная активность конкретного менеджера: ежедневная разбивка (сообщения + активные минуты), почасовое распределение (Москва), итоги. Сессии: порог 10 мин, буфер 5 мин.',
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string' },
+            description: 'Intercom admin id',
+          },
+          { $ref: '#/components/parameters/Period' },
+          { $ref: '#/components/parameters/From' },
+          { $ref: '#/components/parameters/To' },
+        ],
+        responses: {
+          '200': {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    admin: {
+                      type: 'object',
+                      properties: {
+                        id: { type: 'string' },
+                        name: { type: 'string', nullable: true },
+                        email: { type: 'string', nullable: true },
+                      },
+                    },
+                    daily: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          day: { type: 'string', format: 'date' },
+                          messages: { type: 'integer' },
+                          active_minutes: { type: 'integer' },
+                        },
+                      },
+                    },
+                    hourly: {
+                      type: 'array',
+                      description: '24 элемента (0–23), час по Москве',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          hour: { type: 'integer' },
+                          messages: { type: 'integer' },
+                        },
+                      },
+                    },
+                    totals: {
+                      type: 'object',
+                      properties: {
+                        messages: { type: 'integer' },
+                        active_minutes: { type: 'integer' },
+                        active_days: { type: 'integer' },
+                        avg_daily_messages: { type: 'number' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '400': { description: 'missing id' },
+          '401': { description: 'Не авторизован' },
+        },
+      },
+    },
     '/api/search': {
       get: {
         tags: ['search'],
