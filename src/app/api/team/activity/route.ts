@@ -20,11 +20,6 @@ interface AdminRow {
   email: string | null;
 }
 
-/** Format unix timestamp to HH:MM in Moscow (UTC+3). */
-function toMoscowTime(ts: number): string {
-  const d = new Date((ts + 3 * 3600) * 1000);
-  return d.toISOString().slice(11, 16);
-}
 
 /** Compute active minutes from sorted timestamps using session algorithm. */
 function computeActiveMinutes(timestamps: number[]): number {
@@ -161,8 +156,8 @@ export async function GET(req: NextRequest) {
         name: adminMap.get(adminId)?.name || null,
         today_messages: todayTs.length,
         today_active_minutes: computeActiveMinutes(todayTs),
-        today_work_start: todayTs.length ? toMoscowTime(todayTs[0]) : null,
-        today_work_end: todayTs.length ? toMoscowTime(todayTs[todayTs.length - 1]) : null,
+        today_work_start: todayTs.length ? todayTs[0] : null,
+        today_work_end: todayTs.length ? todayTs[todayTs.length - 1] : null,
         period_messages: totalMessages,
         period_active_minutes: computeActiveMinutes(timestamps),
         avg_daily_messages: Math.round((totalMessages / activeDays) * 10) / 10,

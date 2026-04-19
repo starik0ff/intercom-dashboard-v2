@@ -13,11 +13,6 @@ interface MsgRow {
   created_at: number;
 }
 
-/** Format unix timestamp to HH:MM in Moscow (UTC+3). */
-function toMoscowTime(ts: number): string {
-  const d = new Date((ts + 3 * 3600) * 1000);
-  return d.toISOString().slice(11, 16);
-}
 
 /** Compute active minutes from sorted timestamps. */
 function computeActiveMinutes(timestamps: number[]): number {
@@ -122,8 +117,8 @@ export async function GET(
         day: r.day,
         messages: r.messages,
         active_minutes: computeActiveMinutes(dayTs),
-        work_start: dayTs.length ? toMoscowTime(dayTs[0]) : null,
-        work_end: dayTs.length ? toMoscowTime(dayTs[dayTs.length - 1]) : null,
+        work_start: dayTs.length ? dayTs[0] : null,
+        work_end: dayTs.length ? dayTs[dayTs.length - 1] : null,
       };
     });
 
