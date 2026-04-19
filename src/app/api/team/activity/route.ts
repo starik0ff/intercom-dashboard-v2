@@ -20,6 +20,12 @@ interface AdminRow {
   email: string | null;
 }
 
+/** Format unix timestamp to HH:MM in Moscow (UTC+3). */
+function toMoscowTime(ts: number): string {
+  const d = new Date((ts + 3 * 3600) * 1000);
+  return d.toISOString().slice(11, 16);
+}
+
 /** Compute active minutes from sorted timestamps using session algorithm. */
 function computeActiveMinutes(timestamps: number[]): number {
   if (timestamps.length === 0) return 0;
@@ -85,20 +91,7 @@ export async function GET(req: NextRequest) {
       )
       .all(...params) as MsgRow[];
 
-    // Today's messages (separate query for today_messages count)
-    const todayMessages = db
-      .prepare(
-        `SELECT m.author_id, COUNT(*) AS cnt
-           FROM messages m
-          WHERE m.author_type = 'admin' AND m.part_type = 'comment'
-            AND m.created_at >= ? AND m.created_at <= ?
-          GROUP BY m.author_id`,
-      )
-      .all(todayStartUtc, todayEndUtc) as { author_id: string; cnt: number }[];
-
-    const todayMap = new Map(todayMessages.map((r) => [r.author_id, r.cnt]));
-
-    // Today's messages for active minutes
+    // Today's messages for count, active minutes, and working hours
     const todayMsgs = db
       .prepare(
         `SELECT m.author_id, m.created_at
@@ -161,11 +154,15 @@ export async function GET(req: NextRequest) {
       const totalMessages = timestamps.length;
       const activeDays = activeDaysMap.get(adminId) || 1;
 
+      const todayTs = todayByAdmin.get(adminId) || [];
+
       return {
         admin_id: adminId,
         name: adminMap.get(adminId)?.name || null,
-        today_messages: todayMap.get(adminId) || 0,
-        today_active_minutes: computeActiveMinutes(todayByAdmin.get(adminId) || []),
+        today_messages: todayTs.length,
+        today_active_minutes: computeActiveMinutes(todayTs),
+        today_work_start: todayTs.length ? toMoscowTime(todayTs[0]) : null,
+        today_work_end: todayTs.length ? toMoscowTime(todayTs[todayTs.length - 1]) : null,
         period_messages: totalMessages,
         period_active_minutes: computeActiveMinutes(timestamps),
         avg_daily_messages: Math.round((totalMessages / activeDays) * 10) / 10,

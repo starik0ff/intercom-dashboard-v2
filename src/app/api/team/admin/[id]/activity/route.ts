@@ -13,6 +13,12 @@ interface MsgRow {
   created_at: number;
 }
 
+/** Format unix timestamp to HH:MM in Moscow (UTC+3). */
+function toMoscowTime(ts: number): string {
+  const d = new Date((ts + 3 * 3600) * 1000);
+  return d.toISOString().slice(11, 16);
+}
+
 /** Compute active minutes from sorted timestamps. */
 function computeActiveMinutes(timestamps: number[]): number {
   if (timestamps.length === 0) return 0;
@@ -110,11 +116,16 @@ export async function GET(
       arr.push(ts);
     }
 
-    const daily = dailyMsgRows.map((r) => ({
-      day: r.day,
-      messages: r.messages,
-      active_minutes: computeActiveMinutes(byDay.get(r.day) || []),
-    }));
+    const daily = dailyMsgRows.map((r) => {
+      const dayTs = byDay.get(r.day) || [];
+      return {
+        day: r.day,
+        messages: r.messages,
+        active_minutes: computeActiveMinutes(dayTs),
+        work_start: dayTs.length ? toMoscowTime(dayTs[0]) : null,
+        work_end: dayTs.length ? toMoscowTime(dayTs[dayTs.length - 1]) : null,
+      };
+    });
 
     // Hourly distribution (Moscow time, 0-23)
     const hourlyRows = db
