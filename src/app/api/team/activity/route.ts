@@ -151,6 +151,24 @@ export async function GET(req: NextRequest) {
 
       const todayTs = todayByAdmin.get(adminId) || [];
 
+      // Compute period_active_minutes as sum of per-day values
+      // to avoid cross-midnight session merging
+      const byDay = new Map<string, number[]>();
+      for (const ts of timestamps) {
+        const d = new Date((ts + 3 * 3600) * 1000);
+        const day = d.toISOString().slice(0, 10);
+        let arr = byDay.get(day);
+        if (!arr) {
+          arr = [];
+          byDay.set(day, arr);
+        }
+        arr.push(ts);
+      }
+      const periodActiveMinutes = [...byDay.values()].reduce(
+        (sum, dayTs) => sum + computeActiveMinutes(dayTs),
+        0,
+      );
+
       return {
         admin_id: adminId,
         name: adminMap.get(adminId)?.name || null,
@@ -159,7 +177,7 @@ export async function GET(req: NextRequest) {
         today_work_start: todayTs.length ? todayTs[0] : null,
         today_work_end: todayTs.length ? todayTs[todayTs.length - 1] : null,
         period_messages: totalMessages,
-        period_active_minutes: computeActiveMinutes(timestamps),
+        period_active_minutes: periodActiveMinutes,
         avg_daily_messages: Math.round((totalMessages / activeDays) * 10) / 10,
       };
     });

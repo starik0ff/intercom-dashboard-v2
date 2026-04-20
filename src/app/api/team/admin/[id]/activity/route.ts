@@ -141,10 +141,10 @@ export async function GET(
       messages: hourlyMap.get(h) || 0,
     }));
 
-    // Totals
+    // Totals — sum per-day active minutes to avoid cross-midnight session merging
     const activeDays = dailyMsgRows.length;
     const totalMessages = timestamps.length;
-    const totalActiveMinutes = computeActiveMinutes(timestamps);
+    const totalActiveMinutes = daily.reduce((sum, d) => sum + d.active_minutes, 0);
 
     return Response.json({
       admin: admin ?? { id, name: null, email: null },
