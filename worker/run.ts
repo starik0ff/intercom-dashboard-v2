@@ -123,7 +123,7 @@ async function main() {
     try {
       console.log('worker: updating waiting times in Intercom...');
       const wt = await refreshWaitingTimes(getDb());
-      console.log(`worker: waiting times — updated=${wt.updated} cleared=${wt.cleared} errors=${wt.errors}`);
+      console.log(`worker: waiting times — total=${wt.total} updated=${wt.updated} errors=${wt.errors}`);
     } catch (err) {
       console.error('worker: waiting time update failed', err);
     }

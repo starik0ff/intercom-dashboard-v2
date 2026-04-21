@@ -1,18 +1,15 @@
 /**
  * Updates "Ожидание ответа" custom attribute on open Intercom conversations.
- * Runs every cycle from the worker daemon.
- *
- * Only processes conversations where:
- * - state = 'open'
- * - last user message within last 7 days
- * - user spoke after admin (client is actually waiting)
+ * Only processes conversations with user activity in last 48h.
+ * Uses parallel batches for speed.
  */
 
 import type Database from 'better-sqlite3';
 
 const BASE_URL = 'https://api.intercom.io';
-const BATCH_DELAY_MS = 150; // ~6-7 req/s to stay within Intercom rate limits
-const CUTOFF_DAYS = 7; // only update conversations with activity in last 7 days
+const CONCURRENCY = 5; // parallel requests
+const DELAY_BETWEEN_BATCHES_MS = 250;
+const CUTOFF_HOURS = 48;
 
 interface WaitingRow {
   id: string;
@@ -39,44 +36,35 @@ function formatWaiting(seconds: number): string {
   return `${min}м`;
 }
 
-async function updateConversation(
-  convId: string,
-  value: string,
-): Promise<boolean> {
-  try {
-    const res = await fetch(`${BASE_URL}/conversations/${convId}`, {
-      method: 'PUT',
-      headers: getHeaders(),
-      body: JSON.stringify({
-        custom_attributes: { 'Ожидание ответа': value },
-      }),
-    });
-    if (res.status === 429) {
-      const delay = parseInt(res.headers.get('retry-after') || '5', 10);
-      await new Promise((r) => setTimeout(r, delay * 1000));
-      const retry = await fetch(`${BASE_URL}/conversations/${convId}`, {
+async function updateConversation(convId: string, value: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`${BASE_URL}/conversations/${convId}`, {
         method: 'PUT',
         headers: getHeaders(),
-        body: JSON.stringify({
-          custom_attributes: { 'Ожидание ответа': value },
-        }),
+        body: JSON.stringify({ custom_attributes: { 'Ожидание ответа': value } }),
       });
-      return retry.ok;
+      if (res.status === 429) {
+        const delay = parseInt(res.headers.get('retry-after') || '3', 10);
+        await new Promise((r) => setTimeout(r, delay * 1000));
+        continue;
+      }
+      return res.ok;
+    } catch {
+      return false;
     }
-    return res.ok;
-  } catch {
-    return false;
   }
+  return false;
 }
 
 export async function refreshWaitingTimes(db: Database.Database): Promise<{
   updated: number;
   errors: number;
+  total: number;
 }> {
   const now = Math.floor(Date.now() / 1000);
-  const cutoff = now - CUTOFF_DAYS * 86400;
+  const cutoff = now - CUTOFF_HOURS * 3600;
 
-  // Only conversations where client is waiting: user wrote last, within 7 days
   const rows = db
     .prepare(
       `SELECT id, last_user_message_at
@@ -84,24 +72,32 @@ export async function refreshWaitingTimes(db: Database.Database): Promise<{
         WHERE state = 'open'
           AND last_user_message_at IS NOT NULL
           AND last_user_message_at >= ?
-          AND (last_admin_message_at IS NULL OR last_admin_message_at < last_user_message_at)`,
+          AND (last_admin_message_at IS NULL OR last_admin_message_at < last_user_message_at)
+        ORDER BY last_user_message_at DESC`,
     )
     .all(cutoff) as WaitingRow[];
 
   let updated = 0;
   let errors = 0;
 
-  for (const row of rows) {
-    const elapsed = now - row.last_user_message_at;
-    if (elapsed < 60) continue;
-
-    const value = formatWaiting(elapsed);
-    const ok = await updateConversation(row.id, value);
-    if (ok) updated++;
-    else errors++;
-
-    await new Promise((r) => setTimeout(r, BATCH_DELAY_MS));
+  // Process in parallel batches
+  for (let i = 0; i < rows.length; i += CONCURRENCY) {
+    const batch = rows.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map((row) => {
+        const elapsed = now - row.last_user_message_at;
+        if (elapsed < 60) return Promise.resolve(true);
+        return updateConversation(row.id, formatWaiting(elapsed));
+      }),
+    );
+    for (const ok of results) {
+      if (ok) updated++;
+      else errors++;
+    }
+    if (i + CONCURRENCY < rows.length) {
+      await new Promise((r) => setTimeout(r, DELAY_BETWEEN_BATCHES_MS));
+    }
   }
 
-  return { updated, errors };
+  return { updated, errors, total: rows.length };
 }
