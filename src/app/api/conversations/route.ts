@@ -31,6 +31,8 @@ interface Row {
   admin_messages_count: number;
   first_response_seconds: number | null;
   source_url: string | null;
+  last_user_message_at: number | null;
+  last_admin_message_at: number | null;
 }
 
 export async function GET(req: NextRequest) {
@@ -77,7 +79,8 @@ export async function GET(req: NextRequest) {
                 c.contact_name, c.contact_email,
                 c.admin_assignee_id, a.name AS admin_name, t.name AS team_name,
                 c.parts_count, c.user_messages_count, c.admin_messages_count,
-                c.first_response_seconds, c.source_url
+                c.first_response_seconds, c.source_url,
+                c.last_user_message_at, c.last_admin_message_at
            FROM conversations c
            LEFT JOIN admins a ON a.id = c.admin_assignee_id
            LEFT JOIN teams  t ON t.id = c.team_assignee_id

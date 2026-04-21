@@ -341,6 +341,8 @@ interface ConversationRow {
   admin_messages_count: number;
   first_response_seconds: number | null;
   source_url: string | null;
+  last_user_message_at: number | null;
+  last_admin_message_at: number | null;
 }
 
 interface ConversationsResp {
@@ -366,6 +368,29 @@ function fmtSec(s: number | null): string {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}м`;
   return `${Math.floor(m / 60)}ч ${m % 60}м`;
+}
+
+/** Compute waiting badge: time since last user message (if user spoke last). */
+function waitingBadge(row: ConversationRow): { text: string; cls: string } | null {
+  const lastUser = row.last_user_message_at;
+  if (!lastUser) return null;
+  // If admin replied after user — not waiting
+  if (row.last_admin_message_at && row.last_admin_message_at >= lastUser) return null;
+  const ms = Date.now() - lastUser * 1000;
+  if (ms < 0) return null;
+  const min = Math.floor(ms / 60000);
+  const hrs = Math.floor(min / 60);
+  const days = Math.floor(hrs / 24);
+  let text: string;
+  if (days > 0) text = `${days}д ${hrs % 24}ч`;
+  else if (hrs > 0) text = `${hrs}ч ${min % 60}м`;
+  else text = `${min}м`;
+  let cls: string;
+  if (min < 30) cls = "bg-green-100 text-green-700";
+  else if (min < 120) cls = "bg-yellow-100 text-yellow-700";
+  else if (min < 480) cls = "bg-orange-100 text-orange-700";
+  else cls = "bg-red-100 text-red-700";
+  return { text, cls };
 }
 
 interface AdminOption { id: string; name: string }
@@ -609,6 +634,7 @@ function ExportConversationsSection() {
                   <th className="text-left px-3 py-2 font-medium">Менеджер</th>
                   <th className="text-right px-3 py-2 font-medium">Сообщ.</th>
                   <th className="text-right px-3 py-2 font-medium">1-й ответ</th>
+                  <th className="text-center px-3 py-2 font-medium">Ожидание</th>
                   <th className="px-3 py-2"></th>
                 </tr>
               </thead>
@@ -643,6 +669,17 @@ function ExportConversationsSection() {
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-gray-600">
                       {fmtSec(c.first_response_seconds)}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      {(() => {
+                        const badge = waitingBadge(c);
+                        if (!badge) return <span className="text-gray-300">—</span>;
+                        return (
+                          <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${badge.cls}`}>
+                            {badge.text}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td className="px-3 py-2 text-right">
                       <a
