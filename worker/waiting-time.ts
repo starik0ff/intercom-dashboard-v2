@@ -2,20 +2,21 @@
  * Updates "Ожидание ответа" custom attribute on open Intercom conversations.
  * Runs every cycle from the worker daemon.
  *
- * Logic: for each open conversation where last message is from user (not admin),
- * compute elapsed time and write a human-readable string to Intercom.
- * If admin already replied last — clear the field.
+ * Only processes conversations where:
+ * - state = 'open'
+ * - last user message within last 7 days
+ * - user spoke after admin (client is actually waiting)
  */
 
 import type Database from 'better-sqlite3';
 
 const BASE_URL = 'https://api.intercom.io';
 const BATCH_DELAY_MS = 150; // ~6-7 req/s to stay within Intercom rate limits
+const CUTOFF_DAYS = 7; // only update conversations with activity in last 7 days
 
 interface WaitingRow {
   id: string;
-  last_user_message_at: number | null;
-  last_admin_message_at: number | null;
+  last_user_message_at: number;
 }
 
 function getHeaders(): Record<string, string> {
@@ -53,7 +54,6 @@ async function updateConversation(
     if (res.status === 429) {
       const delay = parseInt(res.headers.get('retry-after') || '5', 10);
       await new Promise((r) => setTimeout(r, delay * 1000));
-      // Retry once
       const retry = await fetch(`${BASE_URL}/conversations/${convId}`, {
         method: 'PUT',
         headers: getHeaders(),
@@ -71,51 +71,37 @@ async function updateConversation(
 
 export async function refreshWaitingTimes(db: Database.Database): Promise<{
   updated: number;
-  cleared: number;
   errors: number;
 }> {
   const now = Math.floor(Date.now() / 1000);
+  const cutoff = now - CUTOFF_DAYS * 86400;
 
-  // Get all open conversations with message timestamps
+  // Only conversations where client is waiting: user wrote last, within 7 days
   const rows = db
     .prepare(
-      `SELECT id, last_user_message_at, last_admin_message_at
+      `SELECT id, last_user_message_at
          FROM conversations
         WHERE state = 'open'
-          AND (last_user_message_at IS NOT NULL OR last_admin_message_at IS NOT NULL)`,
+          AND last_user_message_at IS NOT NULL
+          AND last_user_message_at >= ?
+          AND (last_admin_message_at IS NULL OR last_admin_message_at < last_user_message_at)`,
     )
-    .all() as WaitingRow[];
+    .all(cutoff) as WaitingRow[];
 
   let updated = 0;
-  let cleared = 0;
   let errors = 0;
 
   for (const row of rows) {
-    const lastUser = row.last_user_message_at;
-    const lastAdmin = row.last_admin_message_at;
+    const elapsed = now - row.last_user_message_at;
+    if (elapsed < 60) continue;
 
-    // Determine if client is waiting (user spoke last)
-    const isWaiting = lastUser && (!lastAdmin || lastAdmin < lastUser);
-
-    let value: string;
-    if (isWaiting) {
-      const elapsed = now - lastUser;
-      if (elapsed < 60) continue; // skip if < 1 min
-      value = formatWaiting(elapsed);
-    } else {
-      value = '';
-    }
-
+    const value = formatWaiting(elapsed);
     const ok = await updateConversation(row.id, value);
-    if (ok) {
-      if (isWaiting) updated++;
-      else cleared++;
-    } else {
-      errors++;
-    }
+    if (ok) updated++;
+    else errors++;
 
     await new Promise((r) => setTimeout(r, BATCH_DELAY_MS));
   }
 
-  return { updated, cleared, errors };
+  return { updated, errors };
 }
