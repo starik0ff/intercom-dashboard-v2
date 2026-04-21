@@ -214,3 +214,12 @@ CREATE TABLE IF NOT EXISTS channel_status_cache (
   status          TEXT NOT NULL DEFAULT 'ok',  -- ok|warning|error
   updated_at      INTEGER NOT NULL  -- unix seconds
 );
+
+-- ---------- admin → telegram mapping (notifications) ----------
+CREATE TABLE IF NOT EXISTS admin_telegram (
+  admin_id         TEXT PRIMARY KEY,
+  telegram_chat_id TEXT NOT NULL,
+  username         TEXT,
+  created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+  FOREIGN KEY (admin_id) REFERENCES admins(id) ON DELETE CASCADE
+);
