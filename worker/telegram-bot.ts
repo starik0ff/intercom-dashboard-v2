@@ -90,8 +90,12 @@ interface AdminRow {
   email: string | null;
 }
 
-function findAdmin(adminId: string): AdminRow | undefined {
-  return db.prepare('SELECT id, name, email FROM admins WHERE id = ?').get(adminId) as AdminRow | undefined;
+function findAdmin(input: string): AdminRow | undefined {
+  // Try by ID first, then by email
+  const byId = db.prepare('SELECT id, name, email FROM admins WHERE id = ?').get(input) as AdminRow | undefined;
+  if (byId) return byId;
+  const byEmail = db.prepare('SELECT id, name, email FROM admins WHERE LOWER(email) = LOWER(?)').get(input) as AdminRow | undefined;
+  return byEmail;
 }
 
 async function sendIntercomVerification(adminId: string, code: string): Promise<boolean> {
@@ -207,11 +211,7 @@ async function handleMessage(chatId: string, text: string, tgUsername?: string):
     setState(chatId, { step: 'await_admin_id', expires_at: now + CODE_TTL });
     await tgSend(chatId,
       '👋 Привет! Я бот уведомлений Intercom.\n\n' +
-      'Для привязки мне нужен ваш <b>Admin ID</b> из Intercom.\n\n' +
-      '📍 Где найти:\n' +
-      'Intercom → Settings → Your profile → скопируйте ID из URL\n' +
-      '<code>app.intercom.com/a/apps/.../admins/XXXXXXX</code>\n\n' +
-      'Введите ваш Admin ID:');
+      'Введите ваш <b>рабочий email</b>, который используется в Intercom:');
     return;
   }
 
@@ -261,8 +261,8 @@ async function handleMessage(chatId: string, text: string, tgUsername?: string):
 
     if (!admin) {
       await tgSend(chatId,
-        '❌ Admin ID не найден в системе.\n\n' +
-        'Убедитесь, что вводите числовой ID из URL профиля Intercom.\n' +
+        '❌ Аккаунт не найден.\n\n' +
+        'Убедитесь, что вводите email, привязанный к Intercom.\n' +
         'Попробуйте ещё раз:');
       return;
     }
