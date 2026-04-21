@@ -19,6 +19,7 @@ import path from 'node:path';
 import { runIncremental } from './incremental';
 import { processExportJobs } from './export-job';
 import { refreshChannelStatusCache } from './channel-status';
+import { refreshWaitingTimes } from './waiting-time';
 import { getDb } from '../src/lib/db/client';
 import { setSyncState } from '../src/lib/db/sync';
 
@@ -117,6 +118,14 @@ async function main() {
       await refreshChannelStatusCache(getDb());
     } catch (err) {
       console.error('worker: channel status refresh failed', err);
+    }
+    // Update "Ожидание ответа" on open Intercom conversations
+    try {
+      console.log('worker: updating waiting times in Intercom...');
+      const wt = await refreshWaitingTimes(getDb());
+      console.log(`worker: waiting times — updated=${wt.updated} cleared=${wt.cleared} errors=${wt.errors}`);
+    } catch (err) {
+      console.error('worker: waiting time update failed', err);
     }
 
     if (stopping) break;
