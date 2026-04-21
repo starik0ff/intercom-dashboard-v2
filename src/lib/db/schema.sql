@@ -223,3 +223,14 @@ CREATE TABLE IF NOT EXISTS admin_telegram (
   created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
   FOREIGN KEY (admin_id) REFERENCES admins(id) ON DELETE CASCADE
 );
+
+-- ---------- telegram registration flow (temporary state) ----------
+CREATE TABLE IF NOT EXISTS telegram_reg (
+  chat_id     TEXT PRIMARY KEY,
+  admin_id    TEXT,
+  admin_name  TEXT,
+  code        TEXT,
+  step        TEXT NOT NULL DEFAULT 'await_admin_id',  -- await_admin_id | await_code
+  expires_at  INTEGER NOT NULL,
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
