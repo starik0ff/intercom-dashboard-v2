@@ -10,7 +10,7 @@
 import { NextRequest } from 'next/server';
 import crypto from 'node:crypto';
 import { getDb } from '@/lib/db/client';
-import { sendTelegramMessage, editTelegramMessage, deleteTelegramMessage, escapeHtml } from '@/lib/telegram';
+import { sendTelegramMessage, editTelegramMessage, deleteTelegramMessage, escapeHtml, getCachedContact, setCachedContact } from '@/lib/telegram';
 
 export const dynamic = 'force-dynamic';
 
@@ -169,41 +169,46 @@ export async function POST(req: NextRequest) {
       firstContact?.email ||
       '';
 
-    // Fetch contact details from Intercom API if name is missing
+    // Fetch contact details from Intercom API if name is missing (with cache)
     if (!contactName && contactId) {
-      try {
-        const icToken = process.env.INTERCOM_TOKEN;
-        if (icToken) {
-          const res = await fetch(`https://api.intercom.io/contacts/${contactId}`, {
-            headers: {
-              'Authorization': `Bearer ${icToken}`,
-              'Intercom-Version': '2.11',
-              'Accept': 'application/json',
-            },
-          });
-          if (res.ok) {
-            const contact = await res.json() as {
-              name?: string; email?: string;
-              avatar?: string;
-              location?: { city?: string };
-            };
-            if (contact.name) {
-              contactName = contact.name;
-            } else if (contact.avatar) {
-              // Build Intercom-style pseudonym from avatar URL
-              // e.g. ".../teal-teapot.png" → "Teal Teapot"
-              const match = contact.avatar.match(/\/([a-z-]+)\.png$/);
-              if (match) {
-                const pseudonym = match[1].split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-                const city = contact.location?.city;
-                contactName = city ? `${pseudonym} from ${city}` : pseudonym;
+      const cached = getCachedContact(contactId);
+      if (cached) {
+        contactName = cached.name;
+        if (!contactEmail) contactEmail = cached.email;
+      } else {
+        try {
+          const icToken = process.env.INTERCOM_TOKEN;
+          if (icToken) {
+            const res = await fetch(`https://api.intercom.io/contacts/${contactId}`, {
+              headers: {
+                'Authorization': `Bearer ${icToken}`,
+                'Intercom-Version': '2.11',
+                'Accept': 'application/json',
+              },
+            });
+            if (res.ok) {
+              const contact = await res.json() as {
+                name?: string; email?: string;
+                avatar?: string;
+                location?: { city?: string };
+              };
+              if (contact.name) {
+                contactName = contact.name;
+              } else if (contact.avatar) {
+                const match = contact.avatar.match(/\/([a-z-]+)\.png$/);
+                if (match) {
+                  const pseudonym = match[1].split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                  const city = contact.location?.city;
+                  contactName = city ? `${pseudonym} from ${city}` : pseudonym;
+                }
               }
+              if (contact.email && !contactEmail) contactEmail = contact.email;
+              if (contactName) setCachedContact(contactId, contactName, contactEmail);
             }
-            if (contact.email && !contactEmail) contactEmail = contact.email;
           }
+        } catch (e) {
+          console.warn('webhook/intercom: failed to fetch contact', e);
         }
-      } catch (e) {
-        console.warn('webhook/intercom: failed to fetch contact', e);
       }
     }
 

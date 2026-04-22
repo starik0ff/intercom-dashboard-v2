@@ -89,67 +89,74 @@ export async function GET() {
 
     let sent = 0;
 
+    // Build list of reminders to send
+    const pending: { thread: typeof threads[0]; newLevel: number }[] = [];
     for (const t of threads) {
-      // Age counted from last user message (updated_at), not from thread creation
       const ageSeconds = now - t.updated_at;
       const newLevel = getRequiredLevel(ageSeconds, t.reminder_level);
-      if (!newLevel) continue;
+      if (newLevel) pending.push({ thread: t, newLevel });
+    }
 
-      // Delete old TG message
-      await deleteTelegramMessage(t.chat_id, t.message_id);
+    // Process in parallel batches of 10
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+      const batch = pending.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(batch.map(async ({ thread: t, newLevel }) => {
+        await deleteTelegramMessage(t.chat_id, t.message_id);
 
-      // Extract message lines from last_text (everything after header block)
-      let msgLines = '';
-      const oldText = t.last_text || '';
-      const emptyLineIdx = oldText.indexOf('\n\n');
-      if (emptyLineIdx !== -1) {
-        msgLines = oldText.slice(emptyLineIdx + 2);
-      }
+        const oldText = t.last_text || '';
+        let msgLines = '';
+        const emptyLineIdx = oldText.indexOf('\n\n');
+        if (emptyLineIdx !== -1) {
+          msgLines = oldText.slice(emptyLineIdx + 2);
+        }
 
-      // Build reminder message — extract name from last_text header if not stored
-      let name = t.contact_name || '';
-      if (!name && oldText) {
-        // Parse from "📩 <b>Name</b>" or "📩 <b>Name</b> (email)"
-        const nameMatch = oldText.match(/📩 <b>([^<]+)<\/b>/);
-        if (nameMatch) name = nameMatch[1];
-      }
-      if (!name) name = 'Посетитель';
+        let name = t.contact_name || '';
+        if (!name && oldText) {
+          const nameMatch = oldText.match(/📩 <b>([^<]+)<\/b>/);
+          if (nameMatch) name = nameMatch[1];
+        }
+        if (!name) name = 'Посетитель';
 
-      let email = t.contact_email || '';
-      if (!email && oldText) {
-        const emailMatch = oldText.match(/<\/b> \(([^)]+)\)/);
-        if (emailMatch) email = emailMatch[1];
-      }
+        let email = t.contact_email || '';
+        if (!email && oldText) {
+          const emailMatch = oldText.match(/<\/b> \(([^)]+)\)/);
+          if (emailMatch) email = emailMatch[1];
+        }
 
-      let channel = t.channel || '';
-      if (!channel && oldText) {
-        const chMatch = oldText.match(/Канал: ([^\n]+)/);
-        if (chMatch) channel = chMatch[1];
-      }
+        let channel = t.channel || '';
+        if (!channel && oldText) {
+          const chMatch = oldText.match(/Канал: ([^\n]+)/);
+          if (chMatch) channel = chMatch[1];
+        }
 
-      const intercomUrl = `https://dashboard-intercom.atomgroup.dev/api/go/conversation/${t.conversation_id}`;
+        const intercomUrl = `https://dashboard-intercom.atomgroup.dev/api/go/conversation/${t.conversation_id}`;
 
-      const headerLines = [`🔔 <b>Напоминание (${formatHours(newLevel)})</b>`];
-      headerLines.push(`📩 <b>${escapeHtml(name)}</b>`);
-      if (email && email !== name) {
-        headerLines[headerLines.length - 1] += ` (${escapeHtml(email)})`;
-      }
-      if (channel) headerLines.push(`Канал: ${escapeHtml(channel)}`);
-      headerLines.push(`<a href="${intercomUrl}">Открыть в Intercom</a>`);
-      headerLines.push('');
-      if (msgLines) headerLines.push(msgLines);
+        const headerLines = [`🔔 <b>Напоминание (${formatHours(newLevel)})</b>`];
+        headerLines.push(`📩 <b>${escapeHtml(name)}</b>`);
+        if (email && email !== name) {
+          headerLines[headerLines.length - 1] += ` (${escapeHtml(email)})`;
+        }
+        if (channel) headerLines.push(`Канал: ${escapeHtml(channel)}`);
+        headerLines.push(`<a href="${intercomUrl}">Открыть в Intercom</a>`);
+        headerLines.push('');
+        if (msgLines) headerLines.push(msgLines);
 
-      const fullText = headerLines.join('\n');
-      const sendResult = await sendTelegramMessage(t.chat_id, fullText);
+        const fullText = headerLines.join('\n');
+        const sendResult = await sendTelegramMessage(t.chat_id, fullText);
 
-      if (sendResult.ok && sendResult.message_id) {
-        db.prepare(
-          `UPDATE telegram_threads
-           SET message_id = ?, last_text = ?, reminder_level = ?, updated_at = ?
-           WHERE conversation_id = ? AND chat_id = ?`,
-        ).run(sendResult.message_id, fullText, newLevel, now, t.conversation_id, t.chat_id);
-        sent++;
-      }
+        if (sendResult.ok && sendResult.message_id) {
+          // Don't update updated_at — keep original time for correct reminder intervals
+          db.prepare(
+            `UPDATE telegram_threads
+             SET message_id = ?, last_text = ?, reminder_level = ?
+             WHERE conversation_id = ? AND chat_id = ?`,
+          ).run(sendResult.message_id, fullText, newLevel, t.conversation_id, t.chat_id);
+          return true;
+        }
+        return false;
+      }));
+      sent += results.filter(r => r.status === 'fulfilled' && r.value).length;
     }
 
     return Response.json({ ok: true, checked: threads.length, sent });
