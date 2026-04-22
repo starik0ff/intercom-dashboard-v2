@@ -97,6 +97,9 @@ export async function proxy(req: NextRequest) {
   if (
     pathname.startsWith("/login") ||
     pathname.startsWith("/api/auth/") ||
+    pathname.startsWith("/api/webhooks/") ||
+    pathname.startsWith("/api/go/") ||
+    pathname.startsWith("/api/cron/") ||
     pathname === "/api" ||
     pathname === "/api/openapi.json" ||
     pathname === "/api/health" ||

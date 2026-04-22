@@ -41,7 +41,32 @@ db.exec(`
     expires_at  INTEGER NOT NULL,
     created_at  INTEGER NOT NULL DEFAULT (unixepoch())
   );
+  CREATE TABLE IF NOT EXISTS telegram_bot_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    chat_id     TEXT NOT NULL,
+    tg_username TEXT,
+    event       TEXT NOT NULL,
+    admin_id    TEXT,
+    admin_email TEXT,
+    detail      TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_tglog_time ON telegram_bot_log(occurred_at);
 `);
+
+// Track verification conversation IDs for auto-close after successful verification
+const verificationConvIds = new Map<string, string>(); // chatId → intercom conversation id
+
+function logEvent(
+  chatId: string,
+  event: string,
+  opts?: { tgUsername?: string; adminId?: string; adminEmail?: string; detail?: string },
+): void {
+  db.prepare(
+    `INSERT INTO telegram_bot_log (chat_id, tg_username, event, admin_id, admin_email, detail)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(chatId, opts?.tgUsername || null, event, opts?.adminId || null, opts?.adminEmail || null, opts?.detail || null);
+}
 
 // ─── Telegram API helpers ─────────────────────────────────────────────
 
@@ -98,45 +123,105 @@ function findAdmin(input: string): AdminRow | undefined {
   return byEmail;
 }
 
-async function sendIntercomVerification(adminId: string, code: string): Promise<boolean> {
-  // Find a recent conversation assigned to this admin to post a note
-  let convId: string | undefined;
+async function sendIntercomVerification(adminId: string, adminEmail: string, code: string): Promise<{ ok: boolean; convId?: string }> {
+  // Create a contact-initiated conversation from a dedicated verification contact.
+  // This appears as a NEW separate conversation in the admin's inbox.
 
-  const openConv = db.prepare(
-    `SELECT id FROM conversations
-      WHERE admin_assignee_id = ? AND state = 'open'
-      ORDER BY updated_at DESC LIMIT 1`,
-  ).get(adminId) as { id: string } | undefined;
-
-  if (openConv) {
-    convId = openConv.id;
-  } else {
-    // Fallback: any conversation for this admin
-    const anyConv = db.prepare(
-      `SELECT id FROM conversations WHERE admin_assignee_id = ? ORDER BY updated_at DESC LIMIT 1`,
-    ).get(adminId) as { id: string } | undefined;
-    if (anyConv) convId = anyConv.id;
+  const contactId = await getOrCreateVerificationContact();
+  if (!contactId) {
+    console.error('telegram-bot: could not find/create verification contact');
+    return { ok: false };
   }
 
-  if (!convId) return false;
-  return await postNote(convId, adminId, code);
-}
-
-async function postNote(convId: string, adminId: string, code: string): Promise<boolean> {
-  const body = `🔐 <b>Код подтверждения Telegram</b><br><br>Ваш код: <b>${code}</b><br><br>Введите этот код в Telegram-бот для привязки уведомлений.<br>Код действует 10 минут.`;
-
-  const res = await fetch(`${INTERCOM_API}/conversations/${convId}/reply`, {
+  // Step 1: Create contact-initiated conversation
+  // Intercom API expects type:"user" (not "contact") for POST /conversations
+  const createRes = await fetch(`${INTERCOM_API}/conversations`, {
     method: 'POST',
     headers: intercomHeaders(),
     body: JSON.stringify({
-      message_type: 'note',
-      type: 'admin',
-      admin_id: adminId,
-      body,
+      from: { type: 'user', id: contactId },
+      body: `🔐 Код подтверждения Telegram\n\nВаш код: ${code}\n\nВведите этот код в Telegram-бот для привязки уведомлений.\nКод действует 10 минут.`,
     }),
   });
 
-  return res.ok;
+  if (!createRes.ok) {
+    const err = await createRes.text();
+    console.error(`telegram-bot: create conversation failed (${createRes.status}):`, err);
+    return { ok: false };
+  }
+
+  const conv = (await createRes.json()) as { conversation_id?: string; id?: string };
+  const convId = conv.conversation_id || conv.id;
+  if (!convId) {
+    console.error('telegram-bot: no conversation id in response');
+    return { ok: false };
+  }
+
+  // Step 2: Assign conversation to the admin so it appears in their inbox
+  const OWNER_ADMIN_ID = '9086168';
+  const assignRes = await fetch(`${INTERCOM_API}/conversations/${convId}/parts`, {
+    method: 'POST',
+    headers: intercomHeaders(),
+    body: JSON.stringify({
+      message_type: 'assignment',
+      type: 'admin',
+      admin_id: OWNER_ADMIN_ID,
+      assignee_id: adminId,
+      body: '',
+    }),
+  });
+
+  return { ok: true, convId };
+}
+
+async function closeVerificationConversation(convId: string, adminId: string): Promise<void> {
+  const res = await fetch(`${INTERCOM_API}/conversations/${convId}/parts`, {
+    method: 'POST',
+    headers: intercomHeaders(),
+    body: JSON.stringify({
+      message_type: 'close',
+      type: 'admin',
+      admin_id: adminId,
+      body: 'Привязка Telegram подтверждена.',
+    }),
+  });
+  if (!res.ok) {
+    console.error(`telegram-bot: close conv ${convId} failed (${res.status})`);
+  }
+}
+
+async function getOrCreateVerificationContact(): Promise<string | null> {
+  const VERIFICATION_EMAIL = 'telegram-verify@atomgroup.dev';
+
+  const searchRes = await fetch(`${INTERCOM_API}/contacts/search`, {
+    method: 'POST',
+    headers: intercomHeaders(),
+    body: JSON.stringify({
+      query: { field: 'email', operator: '=', value: VERIFICATION_EMAIL },
+    }),
+  });
+
+  if (searchRes.ok) {
+    const data = (await searchRes.json()) as { data: { id: string }[] };
+    if (data.data?.length > 0) return data.data[0].id;
+  }
+  const createRes = await fetch(`${INTERCOM_API}/contacts`, {
+    method: 'POST',
+    headers: intercomHeaders(),
+    body: JSON.stringify({
+      role: 'user',
+      email: VERIFICATION_EMAIL,
+      name: 'Telegram Verification',
+    }),
+  });
+
+  if (createRes.ok) {
+    const contact = (await createRes.json()) as { id: string };
+    return contact.id;
+  }
+
+  console.error('telegram-bot: failed to create verification contact');
+  return null;
 }
 
 // ─── Registration flow ────────────────────────────────────────────────
@@ -200,6 +285,7 @@ async function handleMessage(chatId: string, text: string, tgUsername?: string):
   // /start — always restart flow
   if (text === '/start') {
     clearState(chatId);
+    logEvent(chatId, 'start', { tgUsername });
 
     if (isRegistered(chatId)) {
       await tgSend(chatId,
@@ -217,6 +303,7 @@ async function handleMessage(chatId: string, text: string, tgUsername?: string):
 
   // /reset — unregister
   if (text === '/reset') {
+    logEvent(chatId, 'reset', { tgUsername });
     db.prepare('DELETE FROM admin_telegram WHERE telegram_chat_id = ?').run(chatId);
     clearState(chatId);
     await tgSend(chatId, '🔄 Привязка удалена. Введите /start для повторной регистрации.');
@@ -256,10 +343,11 @@ async function handleMessage(chatId: string, text: string, tgUsername?: string):
 
   // Step 1: waiting for admin ID
   if (state.step === 'await_admin_id') {
-    const adminId = text.trim();
-    const admin = findAdmin(adminId);
+    const input = text.trim();
+    const admin = findAdmin(input);
 
     if (!admin) {
+      logEvent(chatId, 'email_entered', { tgUsername, adminEmail: input, detail: 'not_found' });
       await tgSend(chatId,
         '❌ Аккаунт не найден.\n\n' +
         'Убедитесь, что вводите email, привязанный к Intercom.\n' +
@@ -269,7 +357,7 @@ async function handleMessage(chatId: string, text: string, tgUsername?: string):
 
     // Check if this admin is already linked to another telegram
     const existing = db.prepare('SELECT telegram_chat_id FROM admin_telegram WHERE admin_id = ?')
-      .get(adminId) as { telegram_chat_id: string } | undefined;
+      .get(admin.id) as { telegram_chat_id: string } | undefined;
     if (existing && existing.telegram_chat_id !== chatId) {
       await tgSend(chatId, '⚠️ Этот аккаунт уже привязан к другому Telegram. Обратитесь к администратору.');
       clearState(chatId);
@@ -277,24 +365,39 @@ async function handleMessage(chatId: string, text: string, tgUsername?: string):
     }
 
     const code = generateCode();
+    logEvent(chatId, 'email_entered', { tgUsername, adminId: admin.id, adminEmail: admin.email || input });
 
     await tgSend(chatId,
-      `✅ Найден: <b>${admin.name || adminId}</b>${admin.email ? ` (${admin.email})` : ''}\n\n` +
+      `✅ Найден: <b>${admin.name || admin.id}</b>${admin.email ? ` (${admin.email})` : ''}\n\n` +
       '🔐 Отправляю код подтверждения в Intercom...');
 
-    const sent = await sendIntercomVerification(adminId, code);
+    const result = await sendIntercomVerification(admin.id, admin.email || input, code);
 
-    if (!sent) {
+    if (!result.ok) {
+      console.log(`telegram-bot: no conversations for ${admin.id}, using direct code flow`);
+      logEvent(chatId, 'code_sent', { tgUsername, adminId: admin.id, adminEmail: admin.email || input, detail: 'fallback_no_conversations' });
       await tgSend(chatId,
-        '❌ Не удалось отправить код в Intercom (нет диалогов на вашем аккаунте).\n' +
-        'Обратитесь к администратору для ручной привязки.');
-      clearState(chatId);
+        '⚠️ Не удалось отправить код через Intercom (нет диалогов).\n\n' +
+        'Альтернативная проверка: попросите администратора подтвердить привязку ' +
+        'через панель управления, или обратитесь к коллеге с доступом к Intercom — ' +
+        `пусть найдёт заметку с кодом <b>${code}</b> и подтвердит.\n\n` +
+        'Или введите /start для повторной попытки.');
+      setState(chatId, {
+        step: 'await_code',
+        admin_id: admin.id,
+        admin_name: admin.name,
+        code,
+        expires_at: now + CODE_TTL,
+      });
       return;
     }
 
+    logEvent(chatId, 'code_sent', { tgUsername, adminId: admin.id, adminEmail: admin.email || input });
+    if (result.convId) verificationConvIds.set(chatId, result.convId);
+
     setState(chatId, {
       step: 'await_code',
-      admin_id: adminId,
+      admin_id: admin.id,
       admin_name: admin.name,
       code,
       expires_at: now + CODE_TTL,
@@ -302,7 +405,7 @@ async function handleMessage(chatId: string, text: string, tgUsername?: string):
 
     await tgSend(chatId,
       '📨 Код отправлен в Intercom!\n\n' +
-      'Откройте Intercom → найдите заметку с кодом в последнем диалоге.\n\n' +
+      'Откройте Intercom → найдите диалог с "Telegram Verification Bot" в списке.\n\n' +
       'Введите 6-значный код:');
     return;
   }
@@ -324,6 +427,15 @@ async function handleMessage(chatId: string, text: string, tgUsername?: string):
          telegram_chat_id = excluded.telegram_chat_id,
          username = excluded.username`,
     ).run(state.admin_id, chatId, tgUsername || null);
+
+    logEvent(chatId, 'verified', { tgUsername, adminId: state.admin_id || undefined, adminEmail: undefined, detail: state.admin_name || undefined });
+
+    // Close verification conversation in Intercom
+    const vcId = verificationConvIds.get(chatId);
+    if (vcId && state.admin_id) {
+      await closeVerificationConversation(vcId, state.admin_id);
+      verificationConvIds.delete(chatId);
+    }
 
     clearState(chatId);
 
@@ -356,6 +468,7 @@ async function main() {
           const text = u.message.text;
           const username = u.message.from?.username;
           try {
+            console.log(`telegram-bot: msg from ${chatId}: ${text.slice(0, 50)}`);
             await handleMessage(chatId, text, username);
           } catch (err) {
             console.error(`telegram-bot: error handling message from ${chatId}:`, err);

@@ -8,6 +8,7 @@ import {
   Database,
   HeartPulse,
   LogOut,
+  MessageCircle,
   MessageSquare,
   RefreshCw,
   Settings,
@@ -250,6 +251,12 @@ export default function AdminHome() {
                   icon={<ClipboardList className="w-5 h-5" />}
                   title="Логи"
                   desc="Журнал активности пользователей"
+                />
+                <NavTile
+                  href="/admin/telegram"
+                  icon={<MessageCircle className="w-5 h-5" />}
+                  title="Telegram"
+                  desc="Подключение уведомлений менеджеров"
                 />
                 <NavTile
                   href="/api"

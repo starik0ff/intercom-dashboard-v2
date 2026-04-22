@@ -234,3 +234,27 @@ CREATE TABLE IF NOT EXISTS telegram_reg (
   expires_at  INTEGER NOT NULL,
   created_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
+
+-- ---------- telegram notification threads (group messages per conversation) ----------
+CREATE TABLE IF NOT EXISTS telegram_threads (
+  conversation_id  TEXT NOT NULL,
+  chat_id          TEXT NOT NULL,
+  message_id       INTEGER NOT NULL,   -- telegram message_id
+  messages_count   INTEGER NOT NULL DEFAULT 1,
+  last_text        TEXT,               -- full current message text
+  updated_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (conversation_id, chat_id)
+);
+
+-- ---------- telegram bot event log (persistent) ----------
+CREATE TABLE IF NOT EXISTS telegram_bot_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  occurred_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  chat_id     TEXT NOT NULL,
+  tg_username TEXT,
+  event       TEXT NOT NULL,  -- start | email_entered | code_sent | verified | reset | error
+  admin_id    TEXT,
+  admin_email TEXT,
+  detail      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tglog_time ON telegram_bot_log(occurred_at);
